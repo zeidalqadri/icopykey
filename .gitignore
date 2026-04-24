@@ -1,3 +1,26 @@
-Nothing should be ignored in this case, as the changes only include source files (.py) and documentation (.md), which should be tracked by git. No build artifacts, dependencies, or temporary files are present in the change list.
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
 
-Therefore, the output is empty.
+# Virtualenv
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Binary artifacts
+*.exe
+*.dll
+*.so

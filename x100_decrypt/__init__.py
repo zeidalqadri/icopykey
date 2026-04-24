@@ -14,12 +14,12 @@ The package exposes a handful of modules:
 
 * :mod:`x100_decrypt.engine` – provides the high level ``DumpEngine`` that
   coordinates format detection, normalisation, optional decryption and key recovery.
-* :mod:`x100_decrypt.format_strategies` – contains the pluggable
+* :mod:`x100_decrypt.strategies` – contains the pluggable
   ``FormatStrategy`` hierarchy used to interpret different dump
   formats.  The default strategies include
-  :class:`~x100_decrypt.format_strategies.X100FormatStrategy` for the
+  :class:`~x100_decrypt.strategies.X100FormatStrategy` for the
   X100/CopyKey export format and
-  :class:`~x100_decrypt.format_strategies.RawFormatStrategy` for raw
+  :class:`~x100_decrypt.strategies.RawFormatStrategy` for raw
   MIFARE dumps.
 * :mod:`x100_decrypt.crypto` – provides cryptographic primitives for
   decrypting MIFARE Classic data streams, including support for AES-128,
@@ -49,5 +49,5 @@ assume no liability for misuse of this software.
 """
 
 from .engine import DumpEngine, MifareClassicDump
-from .format_strategies import FormatStrategy  # re‑export for convenience
+from .strategies import FormatStrategy  # re‑export for convenience
 __all__ = ["DumpEngine", "MifareClassicDump", "FormatStrategy"]

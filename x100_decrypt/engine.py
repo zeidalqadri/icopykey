@@ -29,7 +29,7 @@ from typing import List, Optional, Tuple, Iterable, Dict, Any
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from .format_strategies import get_strategy, FormatStrategy
+from .strategies import get_strategy, FormatStrategy
 from .external_tools import run_mfoc  # external integration for key recovery
 from .crypto import (
     get_decryptor, 

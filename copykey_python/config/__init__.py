@@ -8,7 +8,7 @@ __author__ = "CopyKEY Python Team"
 __license__ = "MIT"
 
 # Network policy is enforced at the package level
-from config.network_policy import (
+from .network_policy import (
     NetworkPermission,
     is_network_request_allowed,
     get_allowed_endpoints,

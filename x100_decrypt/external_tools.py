@@ -92,7 +92,7 @@ def run_mfoc(
         try:
             with open(outfile, "rb") as fh:
                 keyed = fh.read()
-            from .format_strategies import get_strategy
+            from .strategies import get_strategy
             strategy = get_strategy(keyed)
             return strategy.normalize(keyed, strict=True)
         except Exception:
