@@ -3,11 +3,11 @@ High level engine for processing MIFARE Classic dumps.
 
 The :class:`DumpEngine` coordinates detection of the appropriate
 ``FormatStrategy`` for each input file, normalises the raw bytes into a
-consistent internal representation (:class:`MifareClassicDump`), and writes
-the result to the requested output format.  It optionally integrates
-external key recovery tools to fill in missing sector keys, although the
-default behaviour simply preserves whatever key data is present in the
-input dump.
+consistent internal representation (:class:`MifareClassicDump`), optionally
+decrypts encrypted payloads, and writes the result to the requested output
+format.  It optionally integrates external key recovery tools to fill in
+missing sector keys, although the default behaviour simply preserves
+whatever key data is present in the input dump.
 
 The engine is designed to process multiple files concurrently using
 ``ThreadPoolExecutor``.  Consumers of this module should ensure they
@@ -20,15 +20,26 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple, Iterable
+from typing import List, Optional, Tuple, Iterable, Dict, Any
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .format_strategies import get_strategy, FormatStrategy
 from .external_tools import run_mfoc  # external integration for key recovery
+from .crypto import (
+    get_decryptor, 
+    DecryptionResult, 
+    CipherAlgorithm,
+    verify_decryption
+)
+from .keymanager import KeyManager, KeyInfo
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -131,9 +142,20 @@ class DumpEngine:
 
     A ``DumpEngine`` instance may be reused across multiple invocations.
     It lazily loads the available strategies from :mod:`x100_decrypt.strategies`.
+    
+    The engine now supports optional decryption of encrypted payloads using
+    various cryptographic algorithms (AES, DES, 3DES). Keys can be provided
+    via hex string, file, environment variable, or derived from a password.
     """
 
-    def __init__(self, use_external_recovery: bool = False) -> None:
+    def __init__(
+        self, 
+        use_external_recovery: bool = False,
+        decryption_key: Optional[bytes] = None,
+        decryption_algorithm: Optional[str] = None,
+        decryption_iv: Optional[bytes] = None,
+        key_manager: Optional[KeyManager] = None,
+    ) -> None:
         """
         Parameters
         ----------
@@ -144,9 +166,77 @@ class DumpEngine:
             available on the system ``PATH``.  When ``False`` (the
             default) the engine will preserve whatever keys are present
             in the input dump without attempting recovery.
+        decryption_key:
+            Optional decryption key as raw bytes. If provided along with
+            decryption_algorithm, encrypted payloads will be decrypted.
+        decryption_algorithm:
+            Algorithm to use for decryption (e.g., 'aes-128-ecb', 'aes-128-cbc').
+            See CipherAlgorithm enum for supported values.
+        decryption_iv:
+            Initialization vector for CBC mode ciphers. Required if using
+            a CBC mode algorithm.
+        key_manager:
+            Optional KeyManager instance for more advanced key handling.
+            If not provided and decryption_key is set, a temporary
+            KeyManager will be created internally.
         """
         self.use_external_recovery = use_external_recovery
+        self.decryption_key = decryption_key
+        self.decryption_algorithm = decryption_algorithm
+        self.decryption_iv = decryption_iv
+        self.key_manager = key_manager or KeyManager()
+        
+        # Store decryption statistics
+        self._stats: Dict[str, Any] = {
+            "files_processed": 0,
+            "files_decrypted": 0,
+            "decryption_errors": 0,
+            "total_time_seconds": 0.0,
+        }
 
+    def _decrypt_payload(self, data: bytes) -> DecryptionResult:
+        """Attempt to decrypt the given payload.
+        
+        Parameters
+        ----------
+        data:
+            The encrypted data to decrypt.
+            
+        Returns
+        -------
+        DecryptionResult:
+            Result containing plaintext or error information.
+        """
+        if not self.decryption_key or not self.decryption_algorithm:
+            # No decryption configured, return data as-is
+            return DecryptionResult(
+                success=True,
+                plaintext=data,
+                algorithm="none"
+            )
+        
+        try:
+            decryptor = get_decryptor(self.decryption_algorithm)
+            result = decryptor.decrypt(data, self.decryption_key, self.decryption_iv)
+            
+            if result.success:
+                # Verify decryption produced valid output
+                if verify_decryption(result.plaintext):
+                    logger.debug(f"Decryption successful using {self.decryption_algorithm}")
+                else:
+                    logger.warning("Decryption succeeded but verification failed")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Decryption error: {e}")
+            return DecryptionResult(
+                success=False,
+                plaintext=b"",
+                algorithm=self.decryption_algorithm,
+                error_message=str(e)
+            )
+    
     def _process_file(self, infile: Path, outdir: Path, fmt: str, strict: bool) -> Tuple[Path, Optional[Exception]]:
         """Internal helper to process a single file.
 
@@ -154,11 +244,26 @@ class DumpEngine:
         successful ``error`` will be ``None``; otherwise ``output_path``
         will be ``None`` and ``error`` will contain the exception raised.
         """
+        start_time = time.time()
+        
         try:
             with open(infile, "rb") as fh:
                 raw = fh.read()
             strategy: FormatStrategy = get_strategy(raw)
             dump = strategy.normalize(raw, strict=strict)
+            
+            # Optionally decrypt the payload
+            if self.decryption_key and self.decryption_algorithm:
+                decrypt_result = self._decrypt_payload(dump.data)
+                if decrypt_result.success:
+                    dump.data = decrypt_result.plaintext
+                    dump.size = len(dump.data)
+                    self._stats["files_decrypted"] += 1
+                else:
+                    self._stats["decryption_errors"] += 1
+                    if strict:
+                        raise ValueError(f"Decryption failed: {decrypt_result.error_message}")
+            
             # optionally recover missing keys
             if self.use_external_recovery:
                 dump = run_mfoc(dump)
@@ -172,6 +277,12 @@ class DumpEngine:
                 raise ValueError(f"Unknown output format: {fmt}")
             out_path = outdir / f"{infile.stem}{out_ext}"
             dump.write(out_path, fmt)
+            
+            # Update statistics
+            elapsed = time.time() - start_time
+            self._stats["files_processed"] += 1
+            self._stats["total_time_seconds"] += elapsed
+            
             return out_path, None
         except Exception as exc:  # pylint: disable=broad-except
             return infile, exc
