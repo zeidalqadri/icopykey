@@ -2,6 +2,9 @@
 hidapi>=0.14.0
 pycryptodome>=3.19.0
 
+# Terminal formatting (optional — falls back to plain text)
+rich>=13.0
+
 # Network (ONLY for updater module)
 requests>=2.31.0
 
