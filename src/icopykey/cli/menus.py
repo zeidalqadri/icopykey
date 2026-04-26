@@ -324,13 +324,23 @@ def _run_device_menu(device: CopyKeyDevice) -> None:
         elif cmd == "reconnect":
             cmd_device_reconnect(device)
         elif cmd == "enumerate":
-            devices = device.enumerate_devices()
-            if devices:
-                for i, d in enumerate(devices):
-                    print_info(f"  {i}. {d.get('vendor_id', 0):04X}:{d.get('product_id', 0):04X} "
-                               f"{d.get('product_string', '?')}")
+            try:
+                import hid
+                all_devices = hid.enumerate()
+            except Exception:
+                all_devices = device.enumerate_devices()
+
+            if all_devices:
+                print_info(f"  All HID devices ({len(all_devices)}):")
+                for i, d in enumerate(all_devices):
+                    vend = d.get('vendor_id', 0)
+                    prod = d.get('product_id', 0)
+                    name = d.get('product_string', '') or d.get('manufacturer_string', '')
+                    # Highlight devices matching current VID/PID
+                    marker = " <<<" if (vend == device.vid and prod == device.pid) else ""
+                    print_info(f"  {i}. {vend:04X}:{prod:04X} {name}{marker}")
             else:
-                print_warning("  No matching devices found")
+                print_warning("  No HID devices found. Is the device connected?")
         else:
             print_warning("Unknown command. Try: info | change | reconnect | enumerate | back")
 
