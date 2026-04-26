@@ -307,7 +307,7 @@ def _run_device_menu(device: CopyKeyDevice) -> None:
         print_info("  change    - Change VID/PID and reconnect")
         print_info("  reconnect - Reconnect with current settings")
         print_info("  enumerate - List all HID devices")
-        print_info("  probe     - Listen for raw HID input reports from device")
+        print_info("  probe     - Test all HID commands against device")
         print_info("  back      - Return to main menu")
 
         cmd = input("\n  device> ").strip().lower()
