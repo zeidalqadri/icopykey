@@ -303,12 +303,13 @@ def _run_device_menu(device: CopyKeyDevice) -> None:
                 print_info(f"  Serial:  {info.get('serial', 'N/A')}")
 
         print_info("\n  Commands:")
-        print_info("  info      - Show device details")
-        print_info("  change    - Change VID/PID and reconnect")
-        print_info("  reconnect - Reconnect with current settings")
-        print_info("  enumerate - List all HID devices")
-        print_info("  probe     - Test all HID commands against device")
-        print_info("  back      - Return to main menu")
+        print_info("  info       - Show device details")
+        print_info("  change     - Change VID/PID and reconnect")
+        print_info("  reconnect  - Reconnect with current settings")
+        print_info("  enumerate  - List all HID devices")
+        print_info("  descriptor - Dump HID report descriptor")
+        print_info("  probe      - Test all HID commands against device")
+        print_info("  back       - Return to main menu")
 
         cmd = input("\n  device> ").strip().lower()
 
@@ -342,10 +343,13 @@ def _run_device_menu(device: CopyKeyDevice) -> None:
                     print_info(f"  {i}. {vend:04X}:{prod:04X} {name}{marker}")
             else:
                 print_warning("  No HID devices found. Is the device connected?")
+        elif cmd == "descriptor":
+            from .commands import cmd_device_descriptor
+            cmd_device_descriptor(device)
         elif cmd == "probe":
             cmd_device_probe(device)
         else:
-            print_warning("Unknown command. Try: info | change | reconnect | enumerate | probe | back")
+            print_warning("Unknown command. Try: info | change | reconnect | enumerate | descriptor | probe | back")
 
 
 # ── Help Screen ──────────────────────────────────────────────────

@@ -67,6 +67,8 @@ Examples:
   icopyzed --verbose                Enable debug output
   icopyzed decrypt                  Launch kopized decryption service
   icopyzed convert input.dump       Normalize card dump to JSON
+  icopyzed descriptor               Dump HID report descriptor from device
+  icopyzed probe                    Test all HID command paths against device
         """,
     )
 
@@ -210,6 +212,24 @@ def main(argv: list[str] | None = None) -> int:
             print("Device not found.", file=_sys.stderr)
             return 1
         cmd_device_probe(d)
+        d.disconnect()
+        return 0
+
+    if len(sys.argv) > 1 and sys.argv[1] == "descriptor":
+        import sys as _sys
+        from .operations import CopyKeyDevice as _CD
+        from .commands import cmd_device_descriptor
+        from .config_manager import ConfigManager as _CM
+        cfg = _CM().config
+        vid_str = _sys.argv[2] if len(_sys.argv) > 2 else cfg.device.vid
+        pid_str = _sys.argv[3] if len(_sys.argv) > 3 else cfg.device.pid
+        vid = int(vid_str, 16)
+        pid = int(pid_str, 16)
+        d = _CD(vid=vid, pid=pid)
+        if not d.connect():
+            print("Device not found.", file=_sys.stderr)
+            return 1
+        cmd_device_descriptor(d)
         d.disconnect()
         return 0
 

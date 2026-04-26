@@ -1,9 +1,9 @@
 """
 Business-logic layer for CopyKEY CLI.
 
-Extracts the CopyKeyDevice, CardOperations, LocalLibrary, AESVault,
-MifareSector, and MifareCard classes from the monolithic CLI into
-a dedicated operations module.  No user-interface code lives here.
+Self-contained implementations of AESVault, CopyKeyDevice,
+MifareSector, MifareCard, CardOperations, LocalLibrary.
+ZERO imports from dead core/config/updater modules.
 """
 
 from __future__ import annotations
@@ -473,6 +473,105 @@ class CopyKeyDevice:
         if not resp or resp[0] != self.RESP_SUCCESS:
             return None
         return {"decoded": True, "raw_data": resp[1:].hex()}
+
+    def dump_report_descriptor(self) -> dict[str, Any] | None:
+        """Parse the HID report descriptor from the device."""
+        if not self.device:
+            logger.error("Device not connected")
+            return None
+        try:
+            desc = self.device.get_report_descriptor()
+            if not desc:
+                return None
+            raw = bytes(desc)
+        except Exception as e:
+            logger.error("get_report_descriptor failed: %s", e)
+            return None
+
+        result: dict[str, Any] = {"raw": raw.hex(), "report_ids": set(), "items": []}
+        i = 0
+        while i < len(raw):
+            b = raw[i]
+            if b in (0x85, 0x86, 0x87):
+                result["report_ids"].add(raw[i + 1])
+                result["items"].append({"offset": i, "tag": "REPORT_ID", "value": raw[i + 1]})
+                i += 2
+            elif b == 0x75:
+                result["items"].append({"offset": i, "tag": "REPORT_SIZE", "value": raw[i + 1]})
+                i += 2
+            elif b == 0x95:
+                result["items"].append({"offset": i, "tag": "REPORT_COUNT", "value": raw[i + 1]})
+                i += 2
+            elif b == 0x81:
+                result["items"].append({"offset": i, "tag": "INPUT", "value": raw[i + 1]})
+                i += 2
+            elif b == 0x91:
+                result["items"].append({"offset": i, "tag": "OUTPUT", "value": raw[i + 1]})
+                i += 2
+            elif b == 0xB1:
+                result["items"].append({"offset": i, "tag": "FEATURE", "value": raw[i + 1]})
+                i += 2
+            elif b == 0x09:
+                result["items"].append({"offset": i, "tag": "USAGE", "value": raw[i + 1]})
+                i += 2
+            elif b == 0x05:
+                result["items"].append({"offset": i, "tag": "USAGE_PAGE", "value": raw[i + 1]})
+                i += 2
+            elif b == 0xA1:
+                result["items"].append({"offset": i, "tag": "COLLECTION", "value": raw[i + 1]})
+                i += 2
+            elif b == 0xC0:
+                result["items"].append({"offset": i, "tag": "END_COLLECTION", "value": 0})
+                i += 1
+            elif b == 0x25:
+                val = raw[i + 1] | (raw[i + 2] << 8) if i + 2 < len(raw) else raw[i + 1]
+                result["items"].append({"offset": i, "tag": "LOGICAL_MAX", "value": val})
+                i += 3
+            elif b == 0x15:
+                i += 2 if i + 1 < len(raw) else 1
+            elif b & 0xFC == 0x04:
+                i += (b & 0x03) + 1
+            else:
+                i += 1
+
+        result["report_ids"] = sorted(result["report_ids"])
+        return result
+
+    def read_input_report(self, report_id: int, length: int = 64, timeout_ms: int = 2000) -> bytes | None:
+        """Read a raw HID input report from the device (passive listener)."""
+        if not self.device:
+            return None
+        try:
+            self.device.set_nonblocking(True)
+            data = self.device.read(length, timeout_ms)
+            if data:
+                logger.debug("Input report (id=%02X): %s", report_id, bytes(data).hex())
+                return bytes(data)
+            return None
+        except Exception as e:
+            logger.debug("Input report read: %s", e)
+            return None
+
+    def list_interfaces(self) -> list[dict[str, Any]]:
+        """Return all HID interfaces for this VID/PID including usage page info."""
+        results = []
+        try:
+            for d in hid.enumerate(self.vid, self.pid):
+                results.append({
+                    "path": d.get("path", b""),
+                    "vendor_id": d.get("vendor_id", 0),
+                    "product_id": d.get("product_id", 0),
+                    "product_string": d.get("product_string", ""),
+                    "manufacturer_string": d.get("manufacturer_string", ""),
+                    "serial_number": d.get("serial_number", ""),
+                    "usage_page": d.get("usage_page", 0),
+                    "usage": d.get("usage", 0),
+                    "interface_number": d.get("interface_number", -1),
+                    "release_number": d.get("release_number", 0),
+                })
+        except Exception as e:
+            logger.error("list_interfaces error: %s", e)
+        return results
 
 
 # ── Card Operations ──────────────────────────────────────────────

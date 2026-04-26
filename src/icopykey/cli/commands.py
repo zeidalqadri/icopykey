@@ -342,6 +342,71 @@ def cmd_device_reconnect(device: CopyKeyDevice) -> CommandResult:
     return CommandResult(False, error="Reconnect failed")
 
 
+def cmd_device_descriptor(device: CopyKeyDevice) -> CommandResult:
+    """Dump the HID report descriptor from the device."""
+    if not device.is_connected():
+        print_error("No device connected")
+        return CommandResult(False, error="No device connected")
+
+    print_divider("HID Report Descriptor")
+
+    desc = device.dump_report_descriptor()
+    if desc and desc.get("items"):
+        report_ids = desc.get("report_ids", [])
+        print_success(f"Descriptor: {len(desc['raw']) // 2} bytes, {len(desc['items'])} items")
+        print_info(f"Report IDs: {report_ids}")
+
+        # Build summary per report_id
+        current_id = None
+        current_size = 0
+        current_count = 0
+        current_direction = "?"
+        for item in desc["items"]:
+            if item["tag"] == "REPORT_ID":
+                if current_id is not None:
+                    bits = current_size * current_count
+                    print_info(f"  Report 0x{current_id:02X}: {current_direction}  "
+                               f"{current_size}bit x {current_count} = {bits}bit ({bits // 8} bytes)")
+                current_id = item["value"]
+                current_size = 0
+                current_count = 0
+                current_direction = "?"
+            elif item["tag"] == "REPORT_SIZE":
+                current_size = item["value"]
+            elif item["tag"] == "REPORT_COUNT":
+                current_count = item["value"]
+            elif item["tag"] == "INPUT":
+                current_direction = "INPUT"
+            elif item["tag"] == "OUTPUT":
+                current_direction = "OUTPUT"
+            elif item["tag"] == "FEATURE":
+                current_direction = "FEATURE"
+        if current_id is not None:
+            bits = current_size * current_count
+            print_info(f"  Report 0x{current_id:02X}: {current_direction}  "
+                       f"{current_size}bit x {current_count} = {bits}bit ({bits // 8} bytes)")
+
+        # Interfaces
+        print_divider("-")
+        interfaces = device.list_interfaces()
+        if interfaces:
+            print_info("Device interfaces:")
+            for iface in interfaces:
+                print_info(f"  usage=0x{iface['usage']:04X} page=0x{iface['usage_page']:04X} "
+                           f"intf={iface['interface_number']} '{iface['product_string']}'")
+
+        print_divider("-")
+        print_info("Raw descriptor:")
+        raw_hex = desc["raw"]
+        for i in range(0, len(raw_hex), 64):
+            print_info(f"  {raw_hex[i:i+64]}")
+
+        return CommandResult(True, f"Descriptor with {len(report_ids)} report IDs", data=desc)
+    else:
+        print_error("No report descriptor available (device may block it)")
+        return CommandResult(False, error="No descriptor")
+
+
 def cmd_device_probe(device: CopyKeyDevice) -> CommandResult:
     """Aggressive HID protocol probe: test every command path systematically.
 
@@ -359,6 +424,72 @@ def cmd_device_probe(device: CopyKeyDevice) -> CommandResult:
     print_divider()
 
     results: list[dict] = []
+
+    # ── Section 0: HID Report Descriptor ───────────────────────
+
+    print_info("── Section 0: HID Report Descriptor ──")
+    desc = device.dump_report_descriptor()
+    if desc and desc.get("items"):
+        report_ids = desc.get("report_ids", [])
+        print_success(f"  Descriptor: {len(desc['raw']) // 2} bytes, {len(desc['items'])} items")
+        print_info(f"  Report IDs found: {report_ids}")
+
+        # Build a summary table: for each report_id, show direction, size, count
+        current_id = None
+        current_size = 0
+        current_count = 0
+        current_direction = "?"
+        for item in desc["items"]:
+            if item["tag"] == "REPORT_ID":
+                # Flush previous
+                if current_id is not None:
+                    bits = current_size * current_count
+                    byte_size = bits // 8
+                    print_info(f"    Report 0x{current_id:02X}: {current_direction}  size={current_size}bit  count={current_count}  total={bits}bit ({byte_size} bytes)")
+                current_id = item["value"]
+                current_size = 0
+                current_count = 0
+                current_direction = "?"
+            elif item["tag"] == "REPORT_SIZE":
+                current_size = item["value"]
+            elif item["tag"] == "REPORT_COUNT":
+                current_count = item["value"]
+            elif item["tag"] == "INPUT":
+                current_direction = "INPUT"
+            elif item["tag"] == "OUTPUT":
+                current_direction = "OUTPUT"
+            elif item["tag"] == "FEATURE":
+                current_direction = "FEATURE"
+        # Flush last
+        if current_id is not None:
+            bits = current_size * current_count
+            byte_size = bits // 8
+            print_info(f"    Report 0x{current_id:02X}: {current_direction}  size={current_size}bit  count={current_count}  total={bits}bit ({byte_size} bytes)")
+
+        # Show raw hex
+        print_divider("-")
+        print_info("  Raw descriptor bytes:")
+        raw_hex = desc["raw"]
+        for i in range(0, len(raw_hex), 64):
+            print_info(f"    {raw_hex[i:i+64]}")
+        print_divider("-")
+    else:
+        print_warning("  No report descriptor available (device may block it)")
+
+    # ── Section 0b: Interface listing ──────────────────────────
+
+    print_info("── Section 0b: Interface Discovery ──")
+    interfaces = device.list_interfaces()
+    if interfaces:
+        print_info(f"  {len(interfaces)} interface(s):")
+        for iface in interfaces:
+            print_info(f"    usage=0x{iface['usage']:04X} page=0x{iface['usage_page']:04X} "
+                       f"intf={iface['interface_number']} "
+                       f"'{iface['product_string']}'")
+    else:
+        print_warning("  No interface info available")
+
+    print_divider()
 
     def _test(path: str, cmd: bytes, timeout_ms: int = 500) -> tuple[bool, str, bytes | None]:
         """Test one command. Returns (success, detail, raw_response_bytes)."""
