@@ -1,8 +1,19 @@
 # Active Work
 Project: /home/the_bomb/icopykey
-Task: CLI modular rewrite + test plan documented
+Task: icopyzed package — unified src/ layout, pip install, single command
 Status: completed
 Updated: 2026-04-26
+
+## Completed (current session)
+- [x] Created comprehensive TEST_PLAN.md
+- [x] Rewrote CLI as modular package (10 files, 111 tests)
+- [x] Folded Crypto1 LFSR cipher from core/mifare_crypto.py into cli/operations.py
+- [x] Restructured to src/icopykey/{cli,x100}/ single-package layout
+- [x] Unified dispatcher: icopyzed (interactive) + decrypt + convert subcommands
+- [x] Created pyproject.toml: pip install -e . / pipx install icopyzed
+- [x] Dropped dead code: core/, config/, updater/, gui/ (not imported at runtime)
+- [x] 115 tests pass under installed package (111 CLI + 4 x100)
+- [x] icopyzed --help, icopyzed decrypt --demo, icopyzed convert all work
 
 ## Completed (current session)
 - [x] Created comprehensive TEST_PLAN.md (8 sections, 5 phases, 57 test steps, 12 success criteria)

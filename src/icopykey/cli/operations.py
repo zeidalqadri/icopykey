@@ -48,8 +48,8 @@ logger = logging.getLogger("copykey_cli.operations")
 
 # ── Constants ────────────────────────────────────────────────────
 
-DEVICE_VID = 0x0483
-DEVICE_PID = 0x5740
+DEVICE_VID = 0x6300
+DEVICE_PID = 0x1991
 DEVICE_USAGE_PAGE = 0xFF00
 REPORT_SIZE_IN = 64
 REPORT_SIZE_OUT = 64

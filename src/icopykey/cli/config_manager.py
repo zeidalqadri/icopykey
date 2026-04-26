@@ -25,8 +25,8 @@ DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.json"
 class DeviceConfig:
     """Device connection preferences."""
 
-    vid: str = "0x0483"
-    pid: str = "0x5740"
+    vid: str = "0x6300"
+    pid: str = "0x1991"
     usage_page: str = "0xFF00"
 
 

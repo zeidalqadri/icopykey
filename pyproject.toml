@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "icopyzed"
-version = "0.1.1"
+version = "0.1.2"
 description = "Offline-first NFC/RFID card management CLI for CopyKEY / X100 Smart Card Replicator"
 authors = [
     { name = "icopykey" },
@@ -36,3 +36,6 @@ icopyzed = "icopykey.cli.copykey_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools]
+license-files = []
