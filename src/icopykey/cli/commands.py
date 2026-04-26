@@ -511,136 +511,108 @@ def cmd_device_probe(device: CopyKeyDevice) -> CommandResult:
     except ImportError:
         hid_mod = None
 
-    # ── Section 1: Feature Report path ──────────────────────────
+    # ── Section 1: Real transport probe (output/input reports) ──
 
-    print_info("\n── Section 1: Feature Reports ──")
-    print_info("  Framing: [0x01 report_id] [len] [cmd] [zero-pad to 64]")
-    print_info("  Response: request feature report 0x80")
-    print_info("" )
+    print_info("\n── Section 1: Output/Input Report Transport ──")
+    print_info("  Transport: device.write(64 bytes) → device.read(64 bytes)")
+    print_info("  No report ID, no feature reports (matches HID descriptor)")
+    print_info("")
 
-    opcodes = [
-        (0x10, "CMD_GET_DEVICE_INFO", 2000),
-        (0x00, "NO_OP / ZERO", 1000),
-        (0x01, "CMD_GET_CARD_INFO", 2000),
-        (0x04, "CMD_AUTHENTICATE", 2000),
-        (0x02, "CMD_READ_SECTOR_0", 2000),
-        (0x06, "CMD_WRITE_CARD", 2000),
-        (0xFF, "INVALID_OPCODE", 1000),
-    ]
+    def _build_packet(fmt: str, cmd_id: int, sub: int = 0) -> bytes:
+        """Build a 64-byte packet with the given format and command ID."""
+        if fmt == "raw":
+            return bytes([cmd_id])
+        elif fmt == "len8":
+            return bytes([cmd_id, 0x00])
+        elif fmt == "csum":
+            # [cmd_id] [0x00] [data...] [checksum xor of first 62] [0x00]
+            buf = bytearray(64)
+            buf[0] = cmd_id
+            buf[1] = sub
+            buf[62] = cmd_id ^ sub ^ 0x5A
+            return bytes(buf)
+        elif fmt == "xor_csum":
+            # [cmd_id] [length] [data...] [xor_check] [checksum]
+            buf = bytearray(64)
+            buf[0] = cmd_id
+            buf[1] = sub
+            buf[2] = 0x00  # payload length (0 = just header)
+            xor = buf[0] ^ buf[1] ^ buf[2]
+            for i in range(3, 62):
+                xor ^= buf[i]
+            buf[62] = xor
+            csum = 0
+            for i in range(63):
+                csum += buf[i]
+            buf[63] = csum & 0xFF
+            return bytes(buf)
+        elif fmt == "cmd_sub_4byte":
+            # [cmd_id] [0x00] [0x00] [0x00] [0x00] - 5-byte header
+            return bytes([cmd_id, sub, 0x00, 0x00, 0x00])
+        elif fmt == "cmd_sub_8byte":
+            return bytes([cmd_id, sub, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        elif fmt == "cmd_sub_16byte":
+            return bytes([cmd_id, sub]) + b"\x00" * 14
+        elif fmt == "cmd_full64":
+            buf = bytearray([cmd_id, sub])
+            buf.extend(b"\x00" * 62)
+            return bytes(buf)
+        return bytes([cmd_id])
 
-    for opcode, name, timeout in opcodes:
-        cmd_bytes = bytes([opcode])
-        ok, detail, resp = _test("feature", cmd_bytes, timeout)
-        results.append({"layer": "feature", "opcode": opcode, "name": name, "ok": ok, "detail": detail})
-        marker = "✓" if ok else "✗"
-        pad = " " * (30 - len(name))
-        print_info(f"  {marker} {name}{pad}{detail}")
+    def _probe_formats(cmd_ids: list[int], label: str, card_needed: bool = False) -> None:
+        """Test multiple packet formats against command IDs."""
+        print_divider(f"── {label} ──")
 
-    # ── Section 2: Place card, re-test ─────────────────────────
+        formats = ["raw", "len8", "csum", "xor_csum", "cmd_full64"]
 
+        # Header
+        header = f"{'ID':>4}"
+        for fmt in formats:
+            header += f"  {fmt:>6}"
+        print_info(header)
+
+        for cmd_id in cmd_ids:
+            row = f"0x{cmd_id:02X}"
+            any_ok = False
+            for fmt in formats:
+                packet = _build_packet(fmt, cmd_id)
+                resp = device.write_read(packet, timeout_ms=500)
+                if resp and len(resp) > 0 and resp != b"\x00" * len(resp):
+                    # Check if response has non-zero content
+                    has_data = any(b != 0 for b in resp)
+                    if has_data:
+                        row += f"  {len(resp):>3}B ✓"
+                        any_ok = True
+                        results.append({
+                            "layer": f"output/{fmt}", "opcode": cmd_id,
+                            "name": label, "ok": True,
+                            "detail": f"{len(resp)}B: {resp[:16].hex()}"
+                        })
+                    else:
+                        row += f"  {'--':>6}"
+                        results.append({"layer": f"output/{fmt}", "opcode": cmd_id,
+                                      "name": label, "ok": False, "detail": "zero-filled"})
+                else:
+                    row += f"  {'--':>6}"
+                    results.append({"layer": f"output/{fmt}", "opcode": cmd_id,
+                                  "name": label, "ok": False, "detail": "no response"})
+            if any_ok:
+                print_success(row)
+            else:
+                print_info(row)
+
+    # ── Test 1: Core command IDs (0x01-0x10) without card ──────
+    _probe_formats(list(range(0x01, 0x11)), "Core Commands (no card)")
+
+    # ── Test with card ────────────────────────────────────────
     print_divider()
     print_warning("PLACE A MIFARE CARD ON THE READER")
     input("  Press Enter when card is in place... ")
     print_info("")
+    _probe_formats(list(range(0x01, 0x11)), "Core Commands (CARD PRESENT)")
 
-    for opcode, name, timeout in opcodes[:4]:  # card-read opcodes only
-        cmd_bytes = bytes([opcode])
-        ok, detail, resp = _test("feature+card", cmd_bytes, timeout)
-        results.append({"layer": "feature+card", "opcode": opcode, "name": name, "ok": ok, "detail": detail})
-        marker = "✓" if ok else "✗"
-        pad = " " * (30 - len(name))
-        print_info(f"  {marker} {name}{pad}{detail}")
-
-    # ── Section 3: Alternative framing ──────────────────────────
-
-    print_divider()
-    print_warning("REMOVE ALL CARDS FROM READER")
-    input("  Press Enter when cleared... ")
-    print_info("")
-    print_info("── Section 3: Alternative Framing ──")
-
-    # 3a: No length byte — just [report_id][cmd][padding]
-    print_info("  3a: [0x01][cmd_byte][zero-pad]  (no length byte)")
-
-    for opcode, name, timeout in opcodes[:4]:
-        cmd_bytes = bytes([opcode])
-        try:
-            report = bytearray()
-            report.append(0x01)
-            report.extend(cmd_bytes)
-            report.extend(b"\x00" * (64 - len(report)))
-            device.device.send_feature_report(bytes(report))
-            resp_data = device.device.get_feature_report(0x80, 64)
-            if resp_data and len(resp_data) > 1:
-                payload = bytes(resp_data[2:2 + resp_data[1]]) if resp_data[1] < len(resp_data) - 2 else bytes(resp_data[1:])
-                detail = f"GOT {len(payload)} bytes"
-                marker = "✓"
-            else:
-                detail = "NO RESPONSE"
-                marker = "✗"
-        except Exception as e:
-            detail = f"ERROR: {e}"
-            marker = "✗"
-        pad = " " * (25 - len(name))
-        print_info(f"    {marker} {name}{pad}{detail}")
-
-    # 3b: Raw output report — write() + read()
-    print_info("")
-    print_info("  3b: Raw hid write() → read() (output/input reports)")
-
-    for opcode, name, timeout in opcodes[:4]:
-        try:
-            data = b"\x00" + bytes([opcode])  # prepend 0x00 for output report
-            device.device.write(data)
-            time.sleep(0.1)
-            resp = device.device.read(64, timeout_ms=500)
-            if resp:
-                detail = f"GOT {len(resp)} bytes: {bytes(resp).hex(' ')[:40]}..."
-                marker = "✓"
-            else:
-                detail = "NO RESPONSE"
-                marker = "✗"
-        except Exception as e:
-            detail = f"ERROR: {e}"
-            marker = "✗"
-        pad = " " * (25 - len(name))
-        print_info(f"    {marker} {name}{pad}{detail}")
-
-    # 3c: Get feature report 0x01 (reverse direction)
-    print_info("")
-    print_info("  3c: get_feature_report(0x01) — device may send data unprompted")
-
-    for report_id in [0x01, 0x80, 0x00, 0x10]:
-        try:
-            resp = device.device.get_feature_report(report_id, 64)
-            if resp and len(resp) > 0:
-                detail = f"report 0x{report_id:02X}: GOT {len(resp)} bytes"
-                marker = "✓"
-            else:
-                detail = f"report 0x{report_id:02X}: EMPTY"
-                marker = "✗"
-        except Exception as e:
-            detail = f"report 0x{report_id:02X}: {e}"
-            marker = "✗"
-        print_info(f"    {marker} {detail}")
-
-    # ── Section 4: Check for other HID interfaces ───────────────
-
-    print_divider()
-    print_info("── Section 4: Interface Discovery ──")
-    if hid_mod:
-        try:
-            all_devs = hid_mod.enumerate()
-            matching = [d for d in all_devs if d.get('vendor_id') == device.vid and d.get('product_id') == device.pid]
-            print_info(f"  Found {len(matching)} interface(s) for 0x{device.vid:04X}:0x{device.pid:04X}:")
-            for i, d in enumerate(matching):
-                usage = d.get('usage', '?')
-                usage_page = d.get('usage_page', '?')
-                interface = d.get('interface_number', '?')
-                print_info(f"    [{i}] usage={usage} page=0x{usage_page:04X} intf={interface} "
-                           f"path={d.get('path', b'?')}")
-        except Exception as e:
-            print_error(f"  Enumeration failed: {e}")
+    # ── Test 2: Extended command IDs (0x11-0x2F) ──────────────
+    _probe_formats(list(range(0x11, 0x30)), "Extended Commands (CARD PRESENT)")
 
     # ── Summary ────────────────────────────────────────────────
 
@@ -648,11 +620,13 @@ def cmd_device_probe(device: CopyKeyDevice) -> CommandResult:
     ok_count = sum(1 for r in results if r["ok"])
     total = len(results)
     print_info(f"\n  Results: {ok_count}/{total} tests returned data")
-    if ok_count == 0:
-        print_error("  No responses from any HID path.")
-        print_warning("  The X100 does not respond to speculative HID commands.")
-        print_warning("  USB traffic capture from the original Windows app is required.")
+    if ok_count:
+        print_success(f"  Responding command IDs:")
+        for r in results:
+            if r["ok"]:
+                print_success(f"    {r['layer']} cmd=0x{r['opcode']:02X}: {r['detail']}")
     else:
-        print_success(f"  {ok_count} responses received — protocol is partially live!")
+        print_error("  No responses from output/input transport.")
+        print_warning("  All command IDs 0x01-0x2F tested across 5 packet formats.")
 
     return CommandResult(True, f"Probed {total} paths, {ok_count} responses")

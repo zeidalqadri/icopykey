@@ -275,7 +275,15 @@ class MifareCard:
 
 
 class CopyKeyDevice:
-    """USB HID communication layer for CopyKEY-compatible devices."""
+    """USB HID communication layer for CopyKEY-compatible devices.
+
+    Based on real HID report descriptor (dumped from X100 at 0x6300:0x1991):
+      - NO REPORT_ID (report uses ID 0 — raw output/input reports)
+      - NO FEATURE reports
+      - INPUT:  64 bytes (Usage 1-8, count 64, size 8 = 8 channels x 8 bytes)
+      - OUTPUT: 64 bytes (Usage 1-8, count 64, size 8)
+    Transport: device.write(64 bytes) → device.read(64 bytes)
+    """
 
     CMD_GET_CARD_INFO = 0x01
     CMD_READ_SECTOR = 0x02
@@ -351,55 +359,64 @@ class CopyKeyDevice:
     def is_connected(self) -> bool:
         return self.device is not None
 
-    def send_feature_report(self, data: bytes) -> bool:
+    # ── Real transport: output/input reports (no feature reports) ─
+
+    def write_output_report(self, data: bytes | bytearray) -> bool:
+        """Write a 64-byte output report to the device.
+
+        The X100 HID descriptor has NO report ID, so we write raw 64 bytes.
+        """
         if not self.device:
             logger.error("Device not connected")
             return False
+        buf = bytearray(data)
+        # Pad/truncate to exactly 64 bytes
+        if len(buf) < 64:
+            buf.extend(b"\x00" * (64 - len(buf)))
+        buf = buf[:64]
         try:
-            self.device.send_feature_report(data)
-            logger.debug("Sent feature report: %s", data.hex())
+            self.device.write(bytes(buf))
+            logger.debug("Wrote 64-byte output report: %s", buf[:16].hex())
             return True
         except Exception as e:
-            logger.error("Failed to send feature report: %s", e)
+            logger.error("Write output report failed: %s", e)
             return False
 
-    def get_feature_report(self, report_id: int, length: int = 64) -> bytes | None:
+    def read_input_report(self, timeout_ms: int = 5000) -> bytes | None:
+        """Read a 64-byte input report from the device.
+
+        The X100 descriptor defines a 64-byte INPUT report (Usage 1-8, count 64, size 8).
+        Set non-blocking so we can timeout.
+        """
         if not self.device:
-            logger.error("Device not connected")
             return None
         try:
-            data = self.device.get_feature_report(report_id, length)
-            logger.debug("Received feature report: %s", data.hex())
-            return bytes(data)
+            self.device.set_nonblocking(True)
+            data = self.device.read(64, timeout_ms)
+            if data:
+                buf = bytes(data)
+                logger.debug("Got %d-byte input report", len(buf))
+                return buf
+            return None
         except Exception as e:
-            logger.error("Failed to get feature report: %s", e)
+            logger.debug("Input report read: %s", e)
             return None
 
-    def send_command(self, cmd: bytes, timeout_ms: int = 5000) -> bytes | None:
+    def write_read(self, data: bytes, timeout_ms: int = 5000) -> bytes | None:
+        """Write 64-byte output report, read 64-byte input report response."""
         if not self.device:
             raise ConnectionError("Device not connected")
-        try:
-            report = bytearray()
-            report.append(FEATURE_REPORT_ID)
-            report.append(len(cmd))
-            report.extend(cmd)
-            report.extend(b"\x00" * (REPORT_SIZE_OUT - len(report)))
-            self.device.send_feature_report(bytes(report))
-            logger.debug("Sent command: %s", cmd.hex())
-            resp = self.device.get_feature_report(RESPONSE_REPORT_ID, REPORT_SIZE_IN)
-            if not resp:
-                logger.error("No response received")
-                return None
-            if len(resp) < 2:
-                logger.error("Response too short")
-                return None
-            if resp[0] != RESPONSE_REPORT_ID:
-                logger.warning("Unexpected response report ID: %02X", resp[0])
-            len_byte = resp[1]
-            return bytes(resp[2 : 2 + len_byte])
-        except Exception as e:
-            logger.error("Command failed: %s", e)
+        if not self.write_output_report(data):
             return None
+        import time as _time
+        _time.sleep(0.05)  # small gap for device to process
+        return self.read_input_report(timeout_ms)
+
+    # ── deprecated transport (kept for reference) ──────────────
+
+    def send_command(self, cmd: bytes, timeout_ms: int = 5000) -> bytes | None:
+        """Legacy send using write/read transport (no feature reports)."""
+        return self.write_read(cmd, timeout_ms)
 
     def get_device_info(self) -> dict[str, str] | None:
         return {
@@ -536,21 +553,6 @@ class CopyKeyDevice:
 
         result["report_ids"] = sorted(result["report_ids"])
         return result
-
-    def read_input_report(self, report_id: int, length: int = 64, timeout_ms: int = 2000) -> bytes | None:
-        """Read a raw HID input report from the device (passive listener)."""
-        if not self.device:
-            return None
-        try:
-            self.device.set_nonblocking(True)
-            data = self.device.read(length, timeout_ms)
-            if data:
-                logger.debug("Input report (id=%02X): %s", report_id, bytes(data).hex())
-                return bytes(data)
-            return None
-        except Exception as e:
-            logger.debug("Input report read: %s", e)
-            return None
 
     def list_interfaces(self) -> list[dict[str, Any]]:
         """Return all HID interfaces for this VID/PID including usage page info."""
