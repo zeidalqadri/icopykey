@@ -34,6 +34,8 @@ from .config_manager import ConfigManager, AppConfig
 from .display import print_success, print_error, print_warning, print_info
 from .operations import (
     HID_AVAILABLE,
+    DEVICE_VID,
+    DEVICE_PID,
     CopyKeyDevice,
     CardOperations,
     LocalLibrary,
@@ -102,148 +104,8 @@ def run_batch_mode(args: argparse.Namespace) -> int:
     config = ConfigManager()
     cfg = config.config
 
-    vid = int(args.vid, 16) if args.vid else config.get_vid()
-    pid = int(args.pid, 16) if args.pid else config.get_pid()
-    data_dir = Path(args.data_dir) if args.data_dir else Path(cfg.paths.vault_dir)
-
-    if not HID_AVAILABLE and any([args.read, args.decode, args.device_info]):
-        print_error("hidapi library not available. Install with: pip install hidapi")
-        return 1
-
-    device = CopyKeyDevice(vid=vid, pid=pid)
-
-    # Connect for device operations
-    if any([args.read, args.decode, args.device_info]):
-        if not device.connect():
-            print_warning("Device not found. Some operations may fail.")
-
-    # Vault password
-    vault_pw: str | None = None
-    if not args.no_encrypt:
-        if args.vault_password:
-            vault_pw = args.vault_password
-        else:
-            try:
-                vault_pw = getpass.getpass("Vault password (Enter for plaintext): ")
-            except (EOFError, KeyboardInterrupt):
-                vault_pw = ""
-        if not vault_pw:
-            vault_pw = None
-
-    library = LocalLibrary(data_dir, vault_pw)
-    ops = CardOperations(device)
-
-    # ── Execute requested operation ───────────────────────
-
-    if args.list_keys:
-        from .commands import cmd_list_keys
-        cmd_list_keys(library)
-
-    elif args.list_cards:
-        from .commands import cmd_list_cards
-        cmd_list_cards(library)
-
-    elif args.import_file:
-        from .commands import cmd_import_card
-        cmd_import_card(library, ops, args.import_file)
-
-    elif args.export_index is not None:
-        from .commands import cmd_export_card
-        cmd_export_card(library, args.export_index, args.output)
-
-    elif args.delete_index is not None:
-        from .commands import cmd_delete_card
-        cmd_delete_card(library, args.delete_index)
-
-    elif args.device_info:
-        from .commands import cmd_device_info
-        cmd_device_info(device)
-
-    elif args.read:
-        from .commands import cmd_read_card
-        cmd_read_card(ops)
-
-    elif args.decode:
-        from .commands import cmd_decode_card
-        cmd_decode_card(ops, library)
-
-    else:
-        print_warning("No operation specified. Use --help to see options.")
-        return 1
-
-    device.disconnect()
-    return 0
-
-
-# ── Main ─────────────────────────────────────────────────────────
-
-
-def main(argv: list[str] | None = None) -> int:
-    """Entry point for the CopyKEY CLI."""
-
-    # ── Subcommand dispatch ────────────────────────────────
-
-    if len(sys.argv) > 1 and sys.argv[1] == "decrypt":
-        sys.argv.pop(1)
-        from icopykey.x100.kopized_cli import main as decrypt_main
-        return decrypt_main()
-
-    if len(sys.argv) > 1 and sys.argv[1] == "convert":
-        sys.argv.pop(1)
-        from icopykey.x100.cli import main as convert_main
-        return convert_main()
-
-    if len(sys.argv) > 1 and sys.argv[1] == "probe":
-        import sys as _sys
-        from .operations import CopyKeyDevice as _CD
-        from .commands import cmd_device_probe
-        from .config_manager import ConfigManager as _CM
-        cfg = _CM().config
-        vid_str = _sys.argv[2] if len(_sys.argv) > 2 else cfg.device.vid
-        pid_str = _sys.argv[3] if len(_sys.argv) > 3 else cfg.device.pid
-        vid = int(vid_str, 16)
-        pid = int(pid_str, 16)
-        d = _CD(vid=vid, pid=pid)
-        if not d.connect():
-            print("Device not found.", file=_sys.stderr)
-            return 1
-        cmd_device_probe(d)
-        d.disconnect()
-        return 0
-
-    # ── Argparse ───────────────────────────────────────────
-
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
-    # Setup logging
-    setup_logging(verbose=args.verbose)
-
-    # Load config
-    config = ConfigManager()
-    cfg = config.config
-
-    if args.no_color:
-        cfg.display.colors = False
-
-    logger.info("CopyKEY CLI v2.1 starting")
-    logger.debug("Config: %s", cfg.to_dict())
-
-    # ── Determine mode ────────────────────────────────────
-
-    has_batch_op = any([
-        args.read, args.decode, args.list_cards, args.list_keys,
-        args.device_info, args.import_file, args.export_index is not None,
-        args.delete_index is not None,
-    ])
-
-    if has_batch_op:
-        return run_batch_mode(args)
-
-    # ── Interactive mode ──────────────────────────────────
-
-    vid = int(args.vid, 16) if args.vid else config.get_vid()
-    pid = int(args.pid, 16) if args.pid else config.get_pid()
+    vid = int(args.vid, 16) if args.vid else DEVICE_VID
+    pid = int(args.pid, 16) if args.pid else DEVICE_PID
     data_dir = Path(args.data_dir) if args.data_dir else Path(cfg.paths.vault_dir)
 
     if not HID_AVAILABLE:
