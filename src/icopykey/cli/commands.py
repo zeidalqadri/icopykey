@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -338,3 +340,57 @@ def cmd_device_reconnect(device: CopyKeyDevice) -> CommandResult:
         return CommandResult(True, "Reconnected")
     print_error("Failed to reconnect. Check USB connection.")
     return CommandResult(False, error="Reconnect failed")
+
+
+def cmd_device_probe(device: CopyKeyDevice) -> CommandResult:
+    """Passive HID listener: read raw input reports from device.
+
+    Opens the device and reads HID input reports in a loop with a
+    short timeout.  When the X100 scans a card (button press), it may
+    send data as input reports.  Raw hex is printed for protocol
+    discovery. Press Ctrl+C to stop.
+    """
+    if not device.is_connected():
+        print_error("Device not connected")
+        return CommandResult(False, error="No device connected")
+
+    if not device.device:
+        print_error("No HID device handle")
+        return CommandResult(False, error="No device handle")
+
+    print_divider("HID Probe — Passive Listener")
+    print_info(f"Device: {device.product} ({device.serial})")
+    print_info("Listening for HID input reports...")
+    print_info("PRESS THE SCAN BUTTON ON THE X100 DEVICE")
+    print_info("Press Ctrl+C to stop.")
+    print_divider()
+
+    report_count: int = 0
+
+    try:
+        while True:
+            try:
+                data = device.device.read(64, timeout_ms=100)
+                if data:
+                    report_count += 1
+                    raw = bytes(data)
+                    ascii_repr = "".join(chr(b) if 32 <= b < 127 else "." for b in raw)
+                    print_info(f"\n[#{report_count}] {len(raw)} bytes")
+                    print_info(f"  HEX: {raw.hex(' ').upper()}")
+                    print_info(f"  RAW: {raw.hex().upper()}")
+                    # Try to decode as text
+                    try:
+                        text = raw.decode("ascii", errors="replace").rstrip("\x00").strip()
+                        if text:
+                            print_info(f"  TXT: {text}")
+                    except Exception:
+                        pass
+                    sys.stdout.flush()
+            except Exception as e:
+                # Timeout is normal — just means no data yet
+                if "timeout" not in str(e).lower():
+                    logger.debug("Probe read error: %s", e)
+    except KeyboardInterrupt:
+        print_info(f"\n\nProbe stopped. Received {report_count} report(s).")
+
+    return CommandResult(True, f"Captured {report_count} report(s)")

@@ -32,6 +32,7 @@ from .commands import (
     cmd_device_info,
     cmd_device_change,
     cmd_device_reconnect,
+    cmd_device_probe,
 )
 from .display import (
     print_success,
@@ -305,7 +306,8 @@ def _run_device_menu(device: CopyKeyDevice) -> None:
         print_info("  info      - Show device details")
         print_info("  change    - Change VID/PID and reconnect")
         print_info("  reconnect - Reconnect with current settings")
-        print_info("  enumerate - List all matching HID devices")
+        print_info("  enumerate - List all HID devices")
+        print_info("  probe     - Listen for raw HID input reports from device")
         print_info("  back      - Return to main menu")
 
         cmd = input("\n  device> ").strip().lower()
@@ -336,13 +338,14 @@ def _run_device_menu(device: CopyKeyDevice) -> None:
                     vend = d.get('vendor_id', 0)
                     prod = d.get('product_id', 0)
                     name = d.get('product_string', '') or d.get('manufacturer_string', '')
-                    # Highlight devices matching current VID/PID
                     marker = " <<<" if (vend == device.vid and prod == device.pid) else ""
                     print_info(f"  {i}. {vend:04X}:{prod:04X} {name}{marker}")
             else:
                 print_warning("  No HID devices found. Is the device connected?")
+        elif cmd == "probe":
+            cmd_device_probe(device)
         else:
-            print_warning("Unknown command. Try: info | change | reconnect | enumerate | back")
+            print_warning("Unknown command. Try: info | change | reconnect | enumerate | probe | back")
 
 
 # ── Help Screen ──────────────────────────────────────────────────
