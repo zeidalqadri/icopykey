@@ -13,10 +13,10 @@ from pathlib import Path
 
 import pytest  # type: ignore
 
-from x100_decrypt.engine import DumpEngine
-from x100_decrypt.strategies import get_strategy, RawFormatStrategy, X100FormatStrategy
-from x100_decrypt.strategies import RawFormatStrategy as Raw
-from x100_decrypt.strategies import X100FormatStrategy as X100
+from icopykey.x100.engine import DumpEngine
+from icopykey.x100.strategies import get_strategy, RawFormatStrategy, X100FormatStrategy
+from icopykey.x100.strategies import RawFormatStrategy as Raw
+from icopykey.x100.strategies import X100FormatStrategy as X100
 
 
 def test_raw_strategy_identification():

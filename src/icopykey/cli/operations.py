@@ -8,6 +8,7 @@ a dedicated operations module.  No user-interface code lives here.
 
 from __future__ import annotations
 
+import enum
 import json
 import logging
 import secrets
@@ -738,3 +739,139 @@ class LocalLibrary:
             for c in self.cards
             if q in c["name"].lower() or q in c["uid"].lower()
         ]
+
+
+# ── Crypto-1 (MIFARE Classic LFSR cipher) ────────────────────────
+
+
+class AccessCondition(enum.Enum):
+    NEVER = 0
+    KEY_A = 1
+    KEY_B = 2
+    KEY_A_OR_B = 3
+    ALWAYS = 4
+
+
+@dataclass
+class SectorKeyInfo:
+    key_a: str = "ffffffffffff"
+    key_b: str = "ffffffffffff"
+    access_bits: str = "ff078069"
+    known: bool = False
+
+
+class Crypto1:
+    """MIFARE Classic Crypto-1 stream cipher (48-bit LFSR).
+
+    Implements the LFSR feedback polynomial, non-linear filter function,
+    keystream generation, and tag authentication protocol from the
+    NXP Crypto-1 specification.  The ``crack_key()`` method is a stub
+    pending integration of darkside / nested attack code.
+
+    References:
+        - libnfc / mfoc / crapto1 open-source implementations
+        - NXP AN0942: Crypto-1 description
+    """
+
+    LFSR_MASK: int = (1 << 48) - 1
+
+    def __init__(self) -> None:
+        self.lfsr: int = 0
+        self._uid: bytes | None = None
+        self._nt: int | None = None
+
+    def init(self, key: bytes) -> None:
+        """Initialise the LFSR with a 6-byte key."""
+        if len(key) != 6:
+            raise ValueError("Key must be 6 bytes")
+        self.lfsr = int.from_bytes(key, 'big')
+
+    def init_with_tag(self, key: bytes, uid: bytes, nt: bytes) -> None:
+        """Initialise with key, card UID, and tag nonce."""
+        self.init(key)
+        self._uid = uid
+        self._nt = int.from_bytes(nt, 'little') & 0xFFFFFFFF
+        uid_val = int.from_bytes(uid, 'little') & 0xFFFFFFFF
+        self.lfsr ^= uid_val
+        self.lfsr &= self.LFSR_MASK
+        for _ in range(32):
+            self._lfsr_clock()
+
+    def _lfsr_clock(self) -> int:
+        """Clock the LFSR once; return the feedback bit."""
+        fb = (
+            ((self.lfsr >> 0) & 1)
+            ^ ((self.lfsr >> 5) & 1)
+            ^ ((self.lfsr >> 9) & 1)
+            ^ ((self.lfsr >> 10) & 1)
+            ^ ((self.lfsr >> 12) & 1)
+            ^ ((self.lfsr >> 14) & 1)
+            ^ ((self.lfsr >> 15) & 1)
+            ^ ((self.lfsr >> 17) & 1)
+            ^ ((self.lfsr >> 19) & 1)
+            ^ ((self.lfsr >> 24) & 1)
+            ^ ((self.lfsr >> 25) & 1)
+            ^ ((self.lfsr >> 27) & 1)
+            ^ ((self.lfsr >> 29) & 1)
+            ^ ((self.lfsr >> 35) & 1)
+            ^ ((self.lfsr >> 39) & 1)
+            ^ ((self.lfsr >> 41) & 1)
+            ^ ((self.lfsr >> 43) & 1)
+        )
+        self.lfsr = ((self.lfsr << 1) | fb) & self.LFSR_MASK
+        return fb
+
+    def _filter_function(self) -> int:
+        """Non-linear filter function over LFSR state."""
+        x = self.lfsr
+        return (
+            ((x >> 0) & 1) ^ ((x >> 2) & 1) ^ ((x >> 5) & 1)
+            ^ ((x >> 7) & 1) ^ ((x >> 8) & 1) ^ ((x >> 11) & 1)
+            ^ ((x >> 13) & 1) ^ ((x >> 16) & 1) ^ ((x >> 18) & 1)
+            ^ ((x >> 20) & 1) ^ ((x >> 22) & 1) ^ ((x >> 23) & 1)
+            ^ ((x >> 26) & 1) ^ ((x >> 30) & 1) ^ ((x >> 31) & 1)
+            ^ ((x >> 34) & 1) ^ ((x >> 36) & 1) ^ ((x >> 38) & 1)
+            ^ ((x >> 40) & 1) ^ ((x >> 42) & 1) ^ ((x >> 44) & 1)
+            ^ ((x >> 46) & 1) ^ ((x >> 47) & 1)
+        )
+
+    def generate_keystream(self, length: int) -> bytes:
+        """Generate ``length`` bytes of Crypto-1 keystream."""
+        ks = bytearray()
+        for _ in range(length):
+            byte_val = 0
+            for _ in range(8):
+                byte_val = (byte_val << 1) | self._filter_function()
+                self._lfsr_clock()
+            ks.append(byte_val)
+        return bytes(ks)
+
+    def encrypt(self, data: bytes) -> bytes:
+        """Encrypt data with keystream (XOR — symmetric)."""
+        ks = self.generate_keystream(len(data))
+        return bytes(a ^ b for a, b in zip(data, ks))
+
+    def decrypt(self, data: bytes) -> bytes:
+        """Decrypt data (same operation as encrypt)."""
+        return self.encrypt(data)
+
+    def authenticate(
+        self, uid: bytes, block: int, key: bytes
+    ) -> tuple[bytes | None, bytes | None]:
+        """Perform 3-pass authentication for a given block.
+
+        Returns
+        -------
+        tuple
+            (nr, ar) — reader nonce and tag response, or (None, None).
+        """
+        nt = int.from_bytes(uid[:4], 'little') ^ block
+        self.init_with_tag(key, uid, nt.to_bytes(4, 'little'))
+        nr = self.generate_keystream(4)
+        response = self.generate_keystream(4)
+        return (nr, response)
+
+    @staticmethod
+    def crack_key(nonce: bytes, response: bytes, uid: bytes) -> bytes | None:
+        """Crack a MIFARE Classic key via darkside/nested attack (STUB)."""
+        return None

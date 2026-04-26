@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "icopyzed"
+version = "0.1.0"
+description = "Offline-first NFC/RFID card management CLI for CopyKEY / X100 Smart Card Replicator"
+authors = [
+    { name = "icopykey" },
+]
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = [
+    "hidapi>=0.14.0",
+    "pycryptodome>=3.19.0",
+    "rich>=13.0",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+# YAML config support (for convert subcommand)
+yaml = ["PyYAML>=5.4"]
+# Developer tooling
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=3.0",
+    "black>=23.0.0",
+]
+# Optional GUI
+gui = ["PyQt6>=6.6.0"]
+
+[project.scripts]
+icopyzed = "icopykey.cli.copykey_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

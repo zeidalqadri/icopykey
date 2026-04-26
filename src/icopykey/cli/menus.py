@@ -186,7 +186,7 @@ def run_main_menu(
 
 def _render_main_menu(device: CopyKeyDevice, library: LocalLibrary) -> None:
     """Draw the main menu screen."""
-    print_header("CopyKEY CLI v2.1", "NFC/RFID Card Management Tool")
+    print_header("icopyzed v2.1", "NFC/RFID Card Management Tool")
     print_status_line(_get_device_status(device), _get_library_status(library))
     print_divider()
     print_info(" 1. Read Card          Read MIFARE/ID/NTAG from device")
@@ -342,7 +342,7 @@ def _show_help() -> None:
     """Display comprehensive help."""
     print_divider("Help")
     print_info("""
-CopyKEY CLI v2.1 - NFC/RFID Card Management Tool
+ICOPYZED CLI — NFC/RFID Card Management Tool
 ================================================
 
 Quick Start:
@@ -351,6 +351,11 @@ Quick Start:
   3. Select '2' to decode all sectors automatically
   4. Select '3' to encrypt with new keys
   5. Select '4' to write to a blank clone card
+
+Subcommands:
+  icopyzed                  Interactive menu (default)
+  icopyzed decrypt          Launch kopized decryption service
+  icopyzed convert FILE     Normalize card dumps to JSON
 
 Card Types Supported:
   - MIFARE Classic 1K (S50):  16 sectors, 64 blocks

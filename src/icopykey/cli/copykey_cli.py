@@ -54,15 +54,17 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  copykey-cli                        Launch interactive menu
-  copykey-cli --read                 Read card from device
-  copykey-cli --decode               One-click decode
-  copykey-cli --list-cards           Show card library
-  copykey-cli --import card.json     Import card file
-  copykey-cli --export 0 -o ./exports Export card by index
-  copykey-cli --device-info          Show connected device details
-  copykey-cli --vid 0x0483 --pid 0x5740  Use custom VID/PID
-  copykey-cli --verbose              Enable debug output
+  icopyzed                          Launch interactive menu
+  icopyzed --read                   Read card from device
+  icopyzed --decode                 One-click decode
+  icopyzed --list-cards             Show card library
+  icopyzed --import card.json       Import card file
+  icopyzed --export 0 -o ./exports  Export card by index
+  icopyzed --device-info            Show connected device details
+  icopyzed --vid 0x0483 --pid 0x5740  Custom VID/PID
+  icopyzed --verbose                Enable debug output
+  icopyzed decrypt                  Launch kopized decryption service
+  icopyzed convert input.dump       Normalize card dump to JSON
         """,
     )
 
@@ -178,6 +180,21 @@ def run_batch_mode(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the CopyKEY CLI."""
+
+    # ── Subcommand dispatch ────────────────────────────────
+
+    if len(sys.argv) > 1 and sys.argv[1] == "decrypt":
+        sys.argv.pop(1)
+        from icopykey.x100.kopized_cli import main as decrypt_main
+        return decrypt_main()
+
+    if len(sys.argv) > 1 and sys.argv[1] == "convert":
+        sys.argv.pop(1)
+        from icopykey.x100.cli import main as convert_main
+        return convert_main()
+
+    # ── Argparse ───────────────────────────────────────────
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
