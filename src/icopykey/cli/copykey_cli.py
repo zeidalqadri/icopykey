@@ -182,6 +182,34 @@ def run_batch_mode(args: argparse.Namespace) -> int:
 # ── Main ─────────────────────────────────────────────────────────
 
 
+def _parse_vid_pid_args(argv: list[str], cfg: Any) -> tuple[int, int]:
+    """Parse --vid / --pid from argv or fall back to config defaults.
+    Also accepts positional args: icopyzed descriptor 0x6300 0x1991
+    """
+    vid: int = 0
+    pid: int = 0
+    i = 2
+    while i < len(argv):
+        if argv[i] == "--vid" and i + 1 < len(argv):
+            vid = int(argv[i + 1], 16)
+            i += 2
+        elif argv[i] == "--pid" and i + 1 < len(argv):
+            pid = int(argv[i + 1], 16)
+            i += 2
+        else:
+            break
+    # If no --vid, try positional args
+    if vid == 0 and len(argv) > 2 and not argv[2].startswith("--"):
+        vid = int(argv[2], 16)
+    if pid == 0 and len(argv) > 3 and not argv[3].startswith("--"):
+        pid = int(argv[3], 16)
+    if vid == 0:
+        vid = int(cfg.device.vid, 16) if isinstance(cfg.device.vid, str) else cfg.device.vid
+    if pid == 0:
+        pid = int(cfg.device.pid, 16) if isinstance(cfg.device.pid, str) else cfg.device.pid
+    return vid, pid
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the CopyKEY CLI."""
 
@@ -203,11 +231,8 @@ def main(argv: list[str] | None = None) -> int:
         from .commands import cmd_device_probe
         from .config_manager import ConfigManager as _CM
         cfg = _CM().config
-        vid_str = _sys.argv[2] if len(_sys.argv) > 2 else cfg.device.vid
-        pid_str = _sys.argv[3] if len(_sys.argv) > 3 else cfg.device.pid
-        vid = int(vid_str, 16)
-        pid = int(pid_str, 16)
-        d = _CD(vid=vid, pid=pid)
+        vid_str, pid_str = _parse_vid_pid_args(_sys.argv, cfg)
+        d = _CD(vid=vid_str, pid=pid_str)
         if not d.connect():
             print("Device not found.", file=_sys.stderr)
             return 1
@@ -221,11 +246,8 @@ def main(argv: list[str] | None = None) -> int:
         from .commands import cmd_device_descriptor
         from .config_manager import ConfigManager as _CM
         cfg = _CM().config
-        vid_str = _sys.argv[2] if len(_sys.argv) > 2 else cfg.device.vid
-        pid_str = _sys.argv[3] if len(_sys.argv) > 3 else cfg.device.pid
-        vid = int(vid_str, 16)
-        pid = int(pid_str, 16)
-        d = _CD(vid=vid, pid=pid)
+        vid_str, pid_str = _parse_vid_pid_args(_sys.argv, cfg)
+        d = _CD(vid=vid_str, pid=pid_str)
         if not d.connect():
             print("Device not found.", file=_sys.stderr)
             return 1
