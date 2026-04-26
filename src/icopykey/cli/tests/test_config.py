@@ -25,8 +25,8 @@ from ..config_manager import (
 class TestAppConfig:
     def test_default_config(self) -> None:
         cfg = AppConfig()
-        assert cfg.device.vid == "0x0483"
-        assert cfg.device.pid == "0x5740"
+        assert cfg.device.vid == "0x6300"
+        assert cfg.device.pid == "0x1991"
         assert cfg.display.colors is True
         assert cfg.security.confirm_writes is True
 
@@ -41,7 +41,7 @@ class TestAppConfig:
         data = {"device": {"vid": "1234"}, "display": {}}
         cfg = AppConfig.from_dict(data)
         assert cfg.device.vid == "1234"
-        assert cfg.device.pid == "0x5740"  # default preserved
+        assert cfg.device.pid == "0x1991"  # default preserved
         assert cfg.display.colors is True  # default preserved
 
 
@@ -51,7 +51,7 @@ class TestConfigManager:
         mgr = ConfigManager(config_path)
         cfg = mgr.load()
         assert config_path.exists()
-        assert cfg.device.vid == "0x0483"
+        assert cfg.device.vid == "0x6300"
 
     def test_load_existing(self, tmp_path: Path) -> None:
         config_path = tmp_path / "config.json"
@@ -91,7 +91,7 @@ class TestConfigManager:
         mgr.reset()
 
         cfg = mgr.config
-        assert cfg.device.vid == "0x0483"
+        assert cfg.device.vid == "0x6300"
 
     def test_get_vid_pid_as_int(self) -> None:
         mgr = ConfigManager()
