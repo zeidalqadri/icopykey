@@ -12,10 +12,6 @@ from __future__ import annotations
 
 from typing import Optional, Tuple, List
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from ..engine import MifareClassicDump
 from .base import FormatStrategy, StrategyRegistry
 
 
@@ -51,6 +47,7 @@ class RawFormatStrategy(FormatStrategy):
             uid = uid_bytes.hex()
         # Extract keys from trailer blocks
         keys = self._extract_keys(payload)
+        from ..engine import MifareClassicDump  # noqa: F401
         return MifareClassicDump(uid=uid, data=payload, keys=keys, size=len(payload))
 
     def _extract_keys(self, data: bytes) -> List[Tuple[Optional[str], Optional[str]]]:

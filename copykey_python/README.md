@@ -27,6 +27,8 @@ Offline-first NFC/RFID card copying tool inspired by CopyKEY Manager.
 - 📱 **USB HID Device Support** - Compatible with CopyKEY hardware
 - 🔐 **Card Encryption** - Generate random keys for cloned cards
 
+The sibling `x100_decrypt/` project provides dump format detection, normalisation, and key recovery for MIFARE Classic dumps — see its [README](../x100_decrypt/README.md) for details.
+
 ## Project Structure
 
 ```
@@ -38,15 +40,15 @@ copykey_python/
 │   ├── __init__.py
 │   ├── device_interface.py  # USB HID communication
 │   ├── card_library.py      # Local card database
-│   ├── mifare_crypto.py     # Crypto-1 implementation (TODO)
-│   ├── card_encryption.py   # Card data encryption (TODO)
-│   └── key_vault.py         # Local key storage (TODO)
+│   ├── mifare_crypto.py     # Crypto-1 implementation
+│   ├── card_encryption.py   # Card data encryption
+│   └── key_vault.py         # Local key storage
 ├── updater/             # Controlled network updates
 │   ├── __init__.py
 │   ├── firmware_updater.py  # Firmware updates only
 │   └── library_updater.py   # Library updates only
 ├── gui/                 # PyQt6 GUI (TODO)
-├── cli/                 # Command-line interface (TODO)
+├── cli/                 # Command-line interface
 └── tests/               # Unit and integration tests
 ```
 
@@ -137,9 +139,9 @@ for file in glob.glob('**/*.py', recursive=True):
   - Card encryption with random or custom keys
   - Interactive menu system
   - Import/export functionality
-- ⏳ Crypto-1 implementation (TODO)
-- ⏳ Card encryption module (TODO)
-- ⏳ Key vault implementation (TODO)
+- ✅ Crypto-1 implementation
+- ✅ Card encryption module
+- ✅ Key vault implementation
 - ⏳ GUI implementation (TODO)
 
 ## License
