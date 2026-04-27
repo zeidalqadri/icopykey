@@ -404,6 +404,19 @@ class CopyKeyDevice:
             logger.debug("Input report read: %s", e)
             return None
 
+    def read_only(self, timeout_ms: int = 2000) -> bytes | None:
+        """Passive read — listen without sending a command."""
+        if not self.device:
+            return None
+        try:
+            self.device.set_nonblocking(True)
+            data = self.device.read(64, timeout_ms)
+            if data:
+                return bytes(data)
+            return b""
+        except Exception:
+            return None
+
     def write_read(self, data: bytes, timeout_ms: int = 5000) -> bytes | None:
         """Write 64-byte output report, read 64-byte input report response."""
         if not self.device:
@@ -590,6 +603,7 @@ MSG_OPEN = 0x02
 MSG_WRITE_READ = 0x03
 MSG_GET_DESCRIPTOR = 0x04
 MSG_CLOSE = 0x05
+MSG_READ_ONLY = 0x06
 HEADER_SIZE = 5  # 1 byte type + 4 bytes length BE
 
 
@@ -770,6 +784,24 @@ class CopyKeyRemoteDevice(CopyKeyDevice):
     def read_input_report(self, timeout_ms: int = 5000) -> bytes | None:
         """Remote: reading is combined with writing.  Returns cached or None."""
         return None  # no-op: actual read happens in write_read
+
+    def read_only(self, timeout_ms: int = 2000) -> bytes | None:
+        """Passive read — listen without sending a command.
+
+        Useful for devices that stream data unprompted (output-only / LCD text).
+        """
+        if not self._sock or not self._connected:
+            return None
+        payload = struct.pack(">I", timeout_ms)
+        if not _send_frame(self._sock, MSG_READ_ONLY, payload):
+            return None
+        frame = _recv_frame(self._sock, timeout=max(timeout_ms / 1000.0 + 2.0, 5.0))
+        if frame is None:
+            return None
+        _, response = frame
+        if len(response) < 1 or response[0] != 0x01:
+            return None
+        return response[1:] if len(response) > 1 else b""
 
     # ── Metadata ─────────────────────────────────────────────
 

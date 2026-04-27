@@ -648,6 +648,45 @@ def cmd_device_probe(device: CopyKeyDevice) -> CommandResult:
         else:
             print_info(f"  {name:<18} {cmd_bytes.hex():<12} -> {detail}")
 
+    # ── Section 3: Passive Listen (no command sent) ──────
+
+    print_divider("── Passive Listen (output-only device test) ──")
+    print_info("  Reading from device WITHOUT sending any command.")
+    print_info("  If the device streams output text (like its LCD), we'll see it.")
+    print_info("  Tries 10 reads at 500ms intervals. Press Ctrl-C to stop early.")
+    print_info("")
+    print_warning("  PLACE A MIFARE CARD ON THE READER")
+    input("  Press Enter when card is in place... ")
+    print_info("")
+
+    passive_hits = 0
+    for i in range(10):
+        try:
+            resp = device.read_only(timeout_ms=500)
+        except AttributeError:
+            resp = None
+        if resp is None:
+            resp = device.read_input_report(timeout_ms=500)
+        if resp and len(resp) > 0 and any(b != 0 for b in resp):
+            passive_hits += 1
+            txt = ""
+            try:
+                txt = resp.decode("ascii", errors="replace").rstrip("\x00").strip()
+            except Exception:
+                pass
+            if txt:
+                print_success(f"    Read {i+1:>2}: {txt[:120]}")
+            else:
+                print_success(f"    Read {i+1:>2}: {resp[:32].hex()}")
+        else:
+            print_info(f"    Read {i+1:>2}: (no data)")
+
+    if passive_hits == 0:
+        print_error("  No passive data received. Device is truly silent.")
+        print_warning("  The device may only output to its LCD, not to USB.")
+    else:
+        print_success(f"  Received data on {passive_hits}/10 passive reads!")
+
     # ── Summary ────────────────────────────────────────────────
 
     print_divider()

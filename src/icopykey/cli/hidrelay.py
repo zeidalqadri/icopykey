@@ -46,6 +46,7 @@ MSG_OPEN = 0x02
 MSG_WRITE_READ = 0x03
 MSG_GET_DESCRIPTOR = 0x04
 MSG_CLOSE = 0x05
+MSG_READ_ONLY = 0x06  # passive read — no write, just listen
 
 HID_REPORT_SIZE = 64
 HEADER_SIZE = 5  # 1 byte type + 4 bytes length
@@ -297,6 +298,24 @@ def _handle_session(sock: socket.socket, vid: int, pid: int) -> None:
         elif msg_type == MSG_CLOSE:
             dev.close()
             _send_frame(sock, MSG_CLOSE, b"\x01")
+
+        elif msg_type == MSG_READ_ONLY:
+            if not dev.is_open:
+                _send_frame(sock, MSG_READ_ONLY, b"\x00" + b"\x00" * 64)
+                continue
+            timeout_ms = 500
+            if len(payload) >= 4:
+                timeout_ms = struct.unpack(">I", payload[:4])[0]
+            try:
+                dev.device.set_nonblocking(True)
+                result = dev.device.read(HID_REPORT_SIZE, timeout_ms)
+                if result:
+                    _send_frame(sock, MSG_READ_ONLY, b"\x01" + bytes(result))
+                else:
+                    _send_frame(sock, MSG_READ_ONLY, b"\x00" + b"\x00" * 64)
+            except Exception as e:
+                logger.debug("Passive read: %s", e)
+                _send_frame(sock, MSG_READ_ONLY, b"\x00" + b"\x00" * 64)
 
         else:
             logger.warning("Unknown message type: 0x%02X", msg_type)
