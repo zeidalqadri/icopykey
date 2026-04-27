@@ -112,10 +112,15 @@ class HIDDevice:
         self.product: str = ""
         self.serial: str = ""
 
+    def _filter_devices(self, devices: list[dict]) -> list[dict]:
+        """Filter devices by configured VID/PID locally (macOS hidapi quirk)."""
+        return [d for d in devices if d.get("vendor_id") == self.vid and d.get("product_id") == self.pid]
+
     def open(self, path: bytes | None = None) -> bool:
         """Connect to the first matching HID device (or specific path)."""
         try:
-            devices = hid.enumerate(self.vid, self.pid)
+            all_devices = hid.enumerate()
+            devices = self._filter_devices(all_devices)
         except Exception as e:
             logger.error("hid.enumerate failed: %s", e)
             return False
@@ -214,7 +219,7 @@ class HIDDevice:
     def enumerate_all(self) -> list[dict[str, Any]]:
         """Return all devices matching configured VID/PID."""
         try:
-            return hid.enumerate(self.vid, self.pid)
+            return self._filter_devices(hid.enumerate())
         except Exception as e:
             logger.error("enumerate error: %s", e)
             return []
