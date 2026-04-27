@@ -609,19 +609,68 @@ def cmd_device_probe(device: CopyKeyDevice) -> CommandResult:
     # ── Test 2: Extended command IDs (0x11-0x2F) ──────────────
     _probe_formats(list(range(0x11, 0x30)), "Extended Commands (CARD PRESENT)")
 
+    # ── Section 2: MIFARE ISO 14443-3 Protocol Probe ────────
+
+    print_divider("── MIFARE ISO 14443-3 Protocol Probe ──")
+    print_info("  Sending standard MIFARE Classic commands (card must be present).")
+    print_info("  These are raw ISO 14443-3 frames, not our custom opcodes.")
+    print_info("")
+
+    def _test_mifare(label: str, cmd: bytes, timeout_ms: int = 2000) -> tuple[bool, str, bytes | None]:
+        resp = device.write_read(cmd, timeout_ms=timeout_ms)
+        if resp is None:
+            return False, "NO RESPONSE", None
+        data = bytes(resp)
+        if all(b == 0 for b in data) or len(data) == 0:
+            return False, "ZERO-FILLED", data
+        return True, f"{len(data)}B: {data[:16].hex()}", data
+
+    mifare_results: list[dict] = []
+
+    # MIFARE Classic ISO 14443-3 commands (1-4 byte short frames)
+    mifare_commands = [
+        ("REQA",        bytes([0x26])),                # wake-up, 7-bit
+        ("WUPA",        bytes([0x52])),                # wake-up type A
+        ("ANTICOLL L1",  bytes([0x93, 0x20])),         # cascade level 1
+        ("SELECT L1",   bytes([0x93, 0x70])),          # select (needs UID appended)
+        ("HLTA",        bytes([0x50, 0x00])),          # halt
+        ("AUTH KEY A 0",bytes([0x60, 0x00])),          # auth key A block 0 (needs key)
+        ("AUTH KEY B 0",bytes([0x61, 0x00])),          # auth key B block 0 (needs key)
+        ("READ BLOCK 0", bytes([0x30, 0x00])),         # read block 0
+    ]
+
+    print_divider("── MIFARE Commands (card present) ──")
+    for name, cmd_bytes in mifare_commands:
+        ok, detail, raw = _test_mifare(name, cmd_bytes, timeout_ms=3000)
+        mifare_results.append({"name": name, "cmd": cmd_bytes.hex(), "ok": ok, "detail": detail, "raw": raw})
+        if ok:
+            print_success(f"  {name:<18} {cmd_bytes.hex():<12} -> {detail}")
+        else:
+            print_info(f"  {name:<18} {cmd_bytes.hex():<12} -> {detail}")
+
     # ── Summary ────────────────────────────────────────────────
 
     print_divider()
     ok_count = sum(1 for r in results if r["ok"])
-    total = len(results)
-    print_info(f"\n  Results: {ok_count}/{total} tests returned data")
+    mifare_ok = sum(1 for r in mifare_results if r["ok"])
+    total = len(results) + len(mifare_results)
+    ok_total = ok_count + mifare_ok
+    print_info(f"\n  Results: {ok_total}/{total} tests returned data")
+    print_info(f"  Generic: {ok_count}/{len(results)}   MIFARE: {mifare_ok}/{len(mifare_results)}")
     if ok_count:
-        print_success(f"  Responding command IDs:")
+        print_success(f"  Responding generic command IDs:")
         for r in results:
             if r["ok"]:
                 print_success(f"    {r['layer']} cmd=0x{r['opcode']:02X}: {r['detail']}")
+    if mifare_ok:
+        print_success(f"  Responding MIFARE commands:")
+        for r in mifare_results:
+            if r["ok"]:
+                print_success(f"    {r['name']}: {r['detail']}")
     else:
-        print_error("  No responses from output/input transport.")
-        print_warning("  All command IDs 0x01-0x2F tested across 5 packet formats.")
+        if ok_count == 0:
+            print_error("  No responses from any transport or protocol.")
+            print_warning("  Device may be output-only (text to LCD), not command-driven.")
+            print_warning("  Try running: icopyzed probe (passive read-only mode)")
 
-    return CommandResult(True, f"Probed {total} paths, {ok_count} responses")
+    return CommandResult(True, f"Probed {total} paths ({ok_total} responses: {ok_count} generic + {mifare_ok} mifare)")
