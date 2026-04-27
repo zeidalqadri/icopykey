@@ -572,8 +572,7 @@ def cmd_device_probe(device: CopyKeyDevice) -> CommandResult:
             for fmt in formats:
                 packet = _build_packet(fmt, cmd_id)
                 resp = device.write_read(packet, timeout_ms=500)
-                if resp and len(resp) > 0 and resp != b"\x00" * len(resp):
-                    # Check if response has non-zero content
+                if resp and len(resp) > 0:
                     has_data = any(b != 0 for b in resp)
                     if has_data:
                         row += f"  {len(resp):>3}B ✓"
@@ -584,7 +583,7 @@ def cmd_device_probe(device: CopyKeyDevice) -> CommandResult:
                             "detail": f"{len(resp)}B: {resp[:16].hex()}"
                         })
                     else:
-                        row += f"  {'--':>6}"
+                        row += f"  {'zer':>6}"
                         results.append({"layer": f"output/{fmt}", "opcode": cmd_id,
                                       "name": label, "ok": False, "detail": "zero-filled"})
                 else:

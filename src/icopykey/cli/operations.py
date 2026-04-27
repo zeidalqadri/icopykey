@@ -842,7 +842,7 @@ class CopyKeyRemoteDevice(CopyKeyDevice):
         """SET_REPORT feature — send feature report via USB control pipe."""
         if not self._sock or not self._connected:
             return False
-        payload = data[:HID_REPORT_SIZE]
+        payload = data[:64]
         if not _send_frame(self._sock, MSG_SET_FEATURE_REPORT, payload):
             return False
         frame = _recv_frame(self._sock, timeout=5.0)
