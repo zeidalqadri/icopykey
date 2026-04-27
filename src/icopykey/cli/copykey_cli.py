@@ -37,6 +37,7 @@ from .operations import (
     DEVICE_VID,
     DEVICE_PID,
     CopyKeyDevice,
+    CopyKeyRemoteDevice,
     CardOperations,
     LocalLibrary,
 )
@@ -69,6 +70,8 @@ Examples:
   icopyzed convert input.dump       Normalize card dump to JSON
   icopyzed descriptor               Dump HID report descriptor from device
   icopyzed probe                    Test all HID command paths against device
+  icopyzed relay-server             Start TCP HID relay (run on machine with hardware)
+  icopyzed probe --relay :9999      Probe device through a relay tunnel
         """,
     )
 
@@ -93,9 +96,29 @@ Examples:
     opt_group.add_argument("--no-encrypt", action="store_true", help="Skip vault encryption (plaintext storage)")
     opt_group.add_argument("--vault-password", metavar="PASS", help="Vault password (prefer interactive prompt)")
     opt_group.add_argument("--data-dir", metavar="DIR", help="Override data directory (default: ~/.copykey_cli)")
+    opt_group.add_argument("--relay", metavar="HOST:PORT", help="Connect via TCP relay (e.g. localhost:9999)")
     opt_group.add_argument("--version", action="version", version="copykey-cli 2.1.0")
 
     return parser
+
+
+# ── Device Factory ───────────────────────────────────────────────
+
+
+def _create_device(args: argparse.Namespace) -> CopyKeyDevice:
+    """Return local or remote device based on --relay flag."""
+    if args.relay:
+        host = "localhost"
+        port = 9999
+        parts = args.relay.rsplit(":", 1)
+        if parts[0]:
+            host = parts[0]
+        port = int(parts[1]) if len(parts) > 1 else 9999
+        return CopyKeyRemoteDevice(host=host, port=port)
+
+    vid = int(args.vid, 16) if args.vid else DEVICE_VID
+    pid = int(args.pid, 16) if args.pid else DEVICE_PID
+    return CopyKeyDevice(vid=vid, pid=pid)
 
 
 # ── Batch Mode ───────────────────────────────────────────────────
@@ -105,16 +128,13 @@ def run_batch_mode(args: argparse.Namespace) -> int:
     """Execute a single operation and exit (non-interactive mode)."""
     config = ConfigManager()
     cfg = config.config
-
-    vid = int(args.vid, 16) if args.vid else DEVICE_VID
-    pid = int(args.pid, 16) if args.pid else DEVICE_PID
     data_dir = Path(args.data_dir) if args.data_dir else Path(cfg.paths.vault_dir)
 
-    if not HID_AVAILABLE and any([args.read, args.decode, args.device_info]):
+    if not args.relay and not HID_AVAILABLE and any([args.read, args.decode, args.device_info]):
         print_error("hidapi library not available. Install with: pip install hidapi")
         return 1
 
-    device = CopyKeyDevice(vid=vid, pid=pid)
+    device = _create_device(args)
 
     # Connect for device operations
     if any([args.read, args.decode, args.device_info]):
@@ -225,14 +245,31 @@ def main(argv: list[str] | None = None) -> int:
         from icopykey.x100.cli import main as convert_main
         return convert_main()
 
+    if len(sys.argv) > 1 and sys.argv[1] == "relay-server":
+        sys.argv.pop(1)
+        from .hidrelay import main as relay_main
+        return relay_main()
+
     if len(sys.argv) > 1 and sys.argv[1] == "probe":
         import sys as _sys
-        from .operations import CopyKeyDevice as _CD
+        if "--relay" in _sys.argv:
+            _sys.argv.pop(_sys.argv.index("probe"))
+            from .commands import cmd_device_probe
+            parser = build_parser()
+            args = parser.parse_args(_sys.argv[1:])
+            d = _create_device(args)
+            if not d.connect():
+                print("Device not found.", file=_sys.stderr)
+                return 1
+            cmd_device_probe(d)
+            d.disconnect()
+            return 0
+
         from .commands import cmd_device_probe
         from .config_manager import ConfigManager as _CM
         cfg = _CM().config
         vid_str, pid_str = _parse_vid_pid_args(_sys.argv, cfg)
-        d = _CD(vid=vid_str, pid=pid_str)
+        d = CopyKeyDevice(vid=vid_str, pid=pid_str)
         if not d.connect():
             print("Device not found.", file=_sys.stderr)
             return 1
@@ -242,12 +279,24 @@ def main(argv: list[str] | None = None) -> int:
 
     if len(sys.argv) > 1 and sys.argv[1] == "descriptor":
         import sys as _sys
-        from .operations import CopyKeyDevice as _CD
+        if "--relay" in _sys.argv:
+            _sys.argv.pop(_sys.argv.index("descriptor"))
+            from .commands import cmd_device_descriptor
+            parser = build_parser()
+            args = parser.parse_args(_sys.argv[1:])
+            d = _create_device(args)
+            if not d.connect():
+                print("Device not found.", file=_sys.stderr)
+                return 1
+            cmd_device_descriptor(d)
+            d.disconnect()
+            return 0
+
         from .commands import cmd_device_descriptor
         from .config_manager import ConfigManager as _CM
         cfg = _CM().config
         vid_str, pid_str = _parse_vid_pid_args(_sys.argv, cfg)
-        d = _CD(vid=vid_str, pid=pid_str)
+        d = CopyKeyDevice(vid=vid_str, pid=pid_str)
         if not d.connect():
             print("Device not found.", file=_sys.stderr)
             return 1
@@ -286,22 +335,24 @@ def main(argv: list[str] | None = None) -> int:
 
     # ── Interactive mode ──────────────────────────────────
 
-    vid = int(args.vid, 16) if args.vid else DEVICE_VID
-    pid = int(args.pid, 16) if args.pid else DEVICE_PID
     data_dir = Path(args.data_dir) if args.data_dir else Path(cfg.paths.vault_dir)
+    using_relay = bool(args.relay)
 
-    if not HID_AVAILABLE:
+    if not using_relay and not HID_AVAILABLE:
         print_warning("hidapi not installed. Device operations unavailable.")
         print_info("Install with: pip install hidapi")
         print_info("(macOS: brew install hidapi && pip install hidapi)")
 
-    device = CopyKeyDevice(vid=vid, pid=pid)
+    device = _create_device(args)
 
     # Connect
-    if HID_AVAILABLE:
+    if using_relay or HID_AVAILABLE:
         if not device.connect():
-            print_warning("Device not found. Running in offline mode.")
-            print_info("You can still manage key/card libraries and import/export.")
+            if using_relay:
+                print_error("Could not connect to relay. Is relay-server running on the remote machine?")
+            else:
+                print_warning("Device not found. Running in offline mode.")
+                print_info("You can still manage key/card libraries and import/export.")
     else:
         print_info("Running in offline mode (no HID support).")
 

@@ -12,7 +12,9 @@ import enum
 import json
 import logging
 import secrets
+import socket
 import struct
+import time
 import getpass
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -491,20 +493,9 @@ class CopyKeyDevice:
             return None
         return {"decoded": True, "raw_data": resp[1:].hex()}
 
-    def dump_report_descriptor(self) -> dict[str, Any] | None:
-        """Parse the HID report descriptor from the device."""
-        if not self.device:
-            logger.error("Device not connected")
-            return None
-        try:
-            desc = self.device.get_report_descriptor()
-            if not desc:
-                return None
-            raw = bytes(desc)
-        except Exception as e:
-            logger.error("get_report_descriptor failed: %s", e)
-            return None
-
+    @staticmethod
+    def _parse_descriptor_bytes(raw: bytes) -> dict[str, Any]:
+        """Parse raw HID report descriptor bytes into a structured dict."""
         result: dict[str, Any] = {"raw": raw.hex(), "report_ids": set(), "items": []}
         i = 0
         while i < len(raw):
@@ -554,6 +545,22 @@ class CopyKeyDevice:
         result["report_ids"] = sorted(result["report_ids"])
         return result
 
+    def dump_report_descriptor(self) -> dict[str, Any] | None:
+        """Parse the HID report descriptor from the device."""
+        if not self.device:
+            logger.error("Device not connected")
+            return None
+        try:
+            desc = self.device.get_report_descriptor()
+            if not desc:
+                return None
+            raw = bytes(desc)
+        except Exception as e:
+            logger.error("get_report_descriptor failed: %s", e)
+            return None
+
+        return self._parse_descriptor_bytes(raw)
+
     def list_interfaces(self) -> list[dict[str, Any]]:
         """Return all HID interfaces for this VID/PID including usage page info."""
         results = []
@@ -574,6 +581,250 @@ class CopyKeyDevice:
         except Exception as e:
             logger.error("list_interfaces error: %s", e)
         return results
+
+
+# ── Remote HID Device (TCP relay client) ─────────────────────────
+
+MSG_ENUMERATE = 0x01
+MSG_OPEN = 0x02
+MSG_WRITE_READ = 0x03
+MSG_GET_DESCRIPTOR = 0x04
+MSG_CLOSE = 0x05
+HEADER_SIZE = 5  # 1 byte type + 4 bytes length BE
+
+
+def _recv_frame(sock: socket.socket, timeout: float = 10.0) -> tuple[int, bytes] | None:
+    """Receive a single framed message.  Returns (msg_type, payload) or None."""
+    sock.settimeout(timeout)
+    try:
+        header = b""
+        while len(header) < HEADER_SIZE:
+            chunk = sock.recv(HEADER_SIZE - len(header))
+            if not chunk:
+                return None
+            header += chunk
+    except (socket.timeout, OSError):
+        return None
+
+    msg_type = header[0]
+    payload_len = struct.unpack(">I", header[1:5])[0]
+
+    if payload_len > 1_048_576:
+        logger.error("Payload too large: %d", payload_len)
+        return None
+
+    payload = b""
+    while len(payload) < payload_len:
+        chunk = sock.recv(payload_len - len(payload))
+        if not chunk:
+            return None
+        payload += chunk
+
+    return msg_type, payload
+
+
+def _send_frame(sock: socket.socket, msg_type: int, payload: bytes) -> bool:
+    """Send a framed message.  Returns True on success."""
+    header = struct.pack(">BI", msg_type, len(payload))
+    try:
+        sock.sendall(header + payload)
+        return True
+    except OSError as e:
+        logger.error("Send failed: %s", e)
+        return False
+
+
+class CopyKeyRemoteDevice(CopyKeyDevice):
+    """USB HID device accessed through a TCP relay (e.g. SSH tunnel to a Mac).
+
+    The relay server runs on the machine with the physical X100 hardware
+    attached and bridges HID write/read to TCP frames.
+
+    Usage:
+        dev = CopyKeyRemoteDevice("localhost", 9999)
+        dev.connect()
+        dev.write_read(b"...")   # transparently goes over TCP
+        dev.disconnect()
+    """
+
+    def __init__(self, host: str = "localhost", port: int = 9999) -> None:
+        super().__init__(vid=0, pid=0)
+        self._host = host
+        self._port = port
+        self._sock: socket.socket | None = None
+        self._connected = False
+
+    # ── Connection lifecycle ─────────────────────────────────
+
+    def connect(self, path: bytes | None = None) -> bool:
+        """Open TCP connection and bind to the remote HID device."""
+        logger.info("Connecting to HID relay at %s:%d ...", self._host, self._port)
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(10.0)
+            sock.connect((self._host, self._port))
+        except OSError as e:
+            logger.error("Failed to connect to relay: %s", e)
+            return False
+
+        # Send OPEN with optional path
+        open_payload = path if path else b""
+        if not _send_frame(sock, MSG_OPEN, open_payload):
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return False
+
+        frame = _recv_frame(sock, timeout=10.0)
+        if frame is None or len(frame[1]) < 1:
+            logger.error("No response from relay on OPEN")
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return False
+
+        _msg_type, payload = frame
+        ok = payload[0] == 0x01
+        if not ok:
+            logger.error("Relay OPEN rejected (device not found?)")
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return False
+
+        # Parse device info from JSON payload
+        try:
+            info = json.loads(payload[1:].decode("utf-8"))
+            self.manufacturer = info.get("manufacturer", "")
+            self.product = info.get("product", "")
+            self.serial = info.get("serial", "")
+            self.device_path = info.get("path", "").encode() if info.get("path") else None
+            self.vid = info.get("vid", 0)
+            self.pid = info.get("pid", 0)
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            logger.warning("Could not parse device info from relay: %s", e)
+
+        self._sock = sock
+        self._connected = True
+        logger.info(
+            "[+] Connected via relay: %s %s (SN: %s)",
+            self.manufacturer,
+            self.product,
+            self.serial,
+        )
+        return True
+
+    def disconnect(self) -> None:
+        """Send CLOSE and release the TCP connection."""
+        self._connected = False
+        if self._sock:
+            if _send_frame(self._sock, MSG_CLOSE, b""):
+                logger.debug("Sent CLOSE to relay")
+            try:
+                self._sock.close()
+            except Exception:
+                pass
+            self._sock = None
+        logger.info("[*] Relay connection closed.")
+
+    def is_connected(self) -> bool:
+        return self._connected and self._sock is not None
+
+    # ── Core transport ───────────────────────────────────────
+
+    def write_read(self, data: bytes, timeout_ms: int = 5000) -> bytes | None:
+        """Send a single WRITE_READ frame: 64-byte output → 64-byte input."""
+        if not self._sock or not self._connected:
+            raise ConnectionError("Not connected to relay")
+
+        buf = bytearray(data)
+        if len(buf) < 64:
+            buf.extend(b"\x00" * (64 - len(buf)))
+        buf = buf[:64]
+
+        payload = struct.pack(">I", timeout_ms) + bytes(buf)
+        if not _send_frame(self._sock, MSG_WRITE_READ, payload):
+            raise ConnectionError("Failed to send WRITE_READ to relay")
+
+        frame = _recv_frame(self._sock, timeout=max(timeout_ms / 1000.0 + 2.0, 5.0))
+        if frame is None:
+            return None
+
+        _msg_type, response = frame
+        if len(response) < 1:
+            return None
+
+        ok = response[0] == 0x01
+        if ok:
+            result = response[1:]
+            return result if result else b"\x00" * 64
+        return None
+
+    def write_output_report(self, data: bytes | bytearray) -> bool:
+        """Remote: combined with read in write_read().  Maintained for API compat."""
+        return True  # no-op: actual write happens in write_read
+
+    def read_input_report(self, timeout_ms: int = 5000) -> bytes | None:
+        """Remote: reading is combined with writing.  Returns cached or None."""
+        return None  # no-op: actual read happens in write_read
+
+    # ── Metadata ─────────────────────────────────────────────
+
+    def enumerate_devices(self) -> list[dict[str, Any]]:
+        """Return devices visible to the remote relay."""
+        if not self._sock or not self._connected:
+            return super().enumerate_devices()
+        if not _send_frame(self._sock, MSG_ENUMERATE, b""):
+            return []
+        frame = _recv_frame(self._sock, timeout=10.0)
+        if frame is None:
+            return []
+        try:
+            return json.loads(frame[1].decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return []
+
+    def list_interfaces(self) -> list[dict[str, Any]]:
+        """Same as enumerate_devices() for the remote relay."""
+        devices = self.enumerate_devices()
+        results = []
+        for d in devices:
+            results.append({
+                "path": d.get("path", b""),
+                "vendor_id": d.get("vendor_id", 0),
+                "product_id": d.get("product_id", 0),
+                "product_string": d.get("product_string", ""),
+                "manufacturer_string": d.get("manufacturer_string", ""),
+                "serial_number": d.get("serial_number", ""),
+                "usage_page": d.get("usage_page", 0),
+                "usage": d.get("usage", 0),
+                "interface_number": d.get("interface_number", -1),
+                "release_number": d.get("release_number", 0),
+            })
+        return results
+
+    def dump_report_descriptor(self) -> dict[str, Any] | None:
+        """Request descriptor bytes from the remote relay, parse locally."""
+        if not self._sock or not self._connected:
+            return None
+        if not _send_frame(self._sock, MSG_GET_DESCRIPTOR, b""):
+            return None
+        frame = _recv_frame(self._sock, timeout=10.0)
+        if frame is None or not frame[1]:
+            return None
+        return self._parse_descriptor_bytes(frame[1])
+
+    def get_device_info(self) -> dict[str, str] | None:
+        """Return cached device metadata from OPEN handshake."""
+        return {
+            "manufacturer": self.manufacturer or "",
+            "product": self.product or "",
+            "serial": self.serial or "",
+            "path": self.device_path.decode() if self.device_path else "",
+        }
 
 
 # ── Card Operations ──────────────────────────────────────────────

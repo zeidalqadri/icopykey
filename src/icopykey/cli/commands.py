@@ -414,7 +414,7 @@ def cmd_device_probe(device: CopyKeyDevice) -> CommandResult:
     the X100 device.  Prompts the user to place/remove a card between tests
     to discover which commands require card presence.
     """
-    if not device.is_connected() or not device.device:
+    if not device.is_connected():
         print_error("Device not connected")
         return CommandResult(False, error="No device connected")
 
@@ -505,11 +505,6 @@ def cmd_device_probe(device: CopyKeyDevice) -> CommandResult:
                 detail += f'  TXT="{txt[:80]}"'
             return True, detail, resp
         return False, "NO RESPONSE (timeout)", None
-
-    try:
-        hid_mod = __import__("hid")
-    except ImportError:
-        hid_mod = None
 
     # ── Section 1: Real transport probe (output/input reports) ──
 

@@ -327,12 +327,14 @@ def _run_device_menu(device: CopyKeyDevice) -> None:
         elif cmd == "reconnect":
             cmd_device_reconnect(device)
         elif cmd == "enumerate":
-            try:
-                import hid
-                all_devices = hid.enumerate()
-            except Exception:
-                all_devices = device.enumerate_devices()
-
+            all_devices = device.enumerate_devices()
+            if not all_devices:
+                # Fallback: try hidapi directly for full bus scan
+                try:
+                    import hid as _hid
+                    all_devices = _hid.enumerate()
+                except Exception:
+                    pass
             if all_devices:
                 print_info(f"  All HID devices ({len(all_devices)}):")
                 for i, d in enumerate(all_devices):
