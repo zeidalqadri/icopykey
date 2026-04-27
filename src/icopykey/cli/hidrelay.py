@@ -47,6 +47,8 @@ MSG_WRITE_READ = 0x03
 MSG_GET_DESCRIPTOR = 0x04
 MSG_CLOSE = 0x05
 MSG_READ_ONLY = 0x06  # passive read — no write, just listen
+MSG_GET_INPUT_REPORT = 0x07  # GET_REPORT control transfer (not interrupt read)
+MSG_SET_FEATURE_REPORT = 0x08  # SET_REPORT feature
 
 HID_REPORT_SIZE = 64
 HEADER_SIZE = 5  # 1 byte type + 4 bytes length
@@ -316,6 +318,33 @@ def _handle_session(sock: socket.socket, vid: int, pid: int) -> None:
             except Exception as e:
                 logger.debug("Passive read: %s", e)
                 _send_frame(sock, MSG_READ_ONLY, b"\x00" + b"\x00" * 64)
+
+        elif msg_type == MSG_GET_INPUT_REPORT:
+            if not dev.is_open:
+                _send_frame(sock, MSG_GET_INPUT_REPORT, b"\x00" + b"\x00" * 64)
+                continue
+            try:
+                report_id = 0
+                buf = dev.device.get_input_report(report_id, HID_REPORT_SIZE)
+                if buf and any(b != 0 for b in buf):
+                    _send_frame(sock, MSG_GET_INPUT_REPORT, b"\x01" + bytes(buf))
+                else:
+                    _send_frame(sock, MSG_GET_INPUT_REPORT, b"\x00" + b"\x00" * 64)
+            except Exception as e:
+                logger.debug("get_input_report: %s", e)
+                _send_frame(sock, MSG_GET_INPUT_REPORT, b"\x00" + b"\x00" * 64)
+
+        elif msg_type == MSG_SET_FEATURE_REPORT:
+            if not dev.is_open:
+                _send_frame(sock, MSG_SET_FEATURE_REPORT, b"\x00")
+                continue
+            try:
+                data = payload[:HID_REPORT_SIZE] if len(payload) >= HID_REPORT_SIZE else payload
+                dev.device.send_feature_report(data)
+                _send_frame(sock, MSG_SET_FEATURE_REPORT, b"\x01")
+            except Exception as e:
+                logger.debug("send_feature_report: %s", e)
+                _send_frame(sock, MSG_SET_FEATURE_REPORT, b"\x00")
 
         else:
             logger.warning("Unknown message type: 0x%02X", msg_type)

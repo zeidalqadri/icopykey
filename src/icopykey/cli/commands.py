@@ -687,15 +687,80 @@ def cmd_device_probe(device: CopyKeyDevice) -> CommandResult:
     else:
         print_success(f"  Received data on {passive_hits}/10 passive reads!")
 
+    # ── Section 4: USB Control Transfer Probe ──────────
+
+    print_divider("── USB Control Transfer Probe ──")
+    print_info("  Trying GET_REPORT (HidD_GetInputReport / control transfer).")
+    print_info("  This is a different USB pipe than interrupt reads — the device")
+    print_info("  may only respond to explicit report requests.")
+    print_info("")
+
+    print_warning("  PLACE A MIFARE CARD ON THE READER")
+    input("  Press Enter when card is in place... ")
+    print_info("")
+
+    ctrl_results: list[dict] = []
+
+    # GET_INPUT_REPORT (no write — just request input report via control pipe)
+    print_info("  ── GET_INPUT_REPORT (control transfer) ──")
+    for attempt in range(5):
+        try:
+            resp = device.get_input_report()
+        except AttributeError:
+            resp = None
+        if resp and len(resp) > 0 and any(b != 0 for b in resp):
+            txt = ""
+            try:
+                txt = resp.decode("ascii", errors="replace").rstrip("\x00").strip()
+            except Exception:
+                pass
+            ctrl_results.append({"type": "GET_INPUT_REPORT", "attempt": attempt, "ok": True, "data": resp, "text": txt})
+            if txt:
+                print_success(f"    GET_INPUT_REPORT {attempt+1}: {txt[:120]}")
+            else:
+                print_success(f"    GET_INPUT_REPORT {attempt+1}: {resp[:32].hex()}")
+        else:
+            ctrl_results.append({"type": "GET_INPUT_REPORT", "attempt": attempt, "ok": False, "data": None, "text": ""})
+            print_info(f"    GET_INPUT_REPORT {attempt+1}: (no data)")
+
+    # SET_FEATURE_REPORT — try waking device with known init patterns
+    print_info("")
+    print_info("  ── SET_FEATURE_REPORT (wake-up attempts) ──")
+    wake_patterns = [
+        ("Init (0x01)", bytes([0x01])),
+        ("Enable (0x55)", bytes([0x55])),
+        ("Wake (0xA5)", bytes([0xA5])),
+        ("ASCII 'START'", b"START"),
+        ("Full 64B w/ 0x01", b"\x01" + b"\x00" * 63),
+    ]
+    for name, pattern in wake_patterns:
+        try:
+            ok = device.send_feature_report(pattern)
+        except AttributeError:
+            ok = False
+        status = "sent" if ok else "FAILED"
+        ctrl_results.append({"type": "SET_FEATURE", "name": name, "ok": ok})
+        if ok:
+            print_success(f"    {name:<24} -> {status}")
+            # After wake, try GET_INPUT_REPORT
+            get_resp = device.get_input_report() if hasattr(device, 'get_input_report') else None
+            if get_resp and any(b != 0 for b in get_resp):
+                print_success(f"      -> post-wake GET: {get_resp[:32].hex()}")
+        else:
+            print_info(f"    {name:<24} -> {status}")
+
+    ctrl_ok = sum(1 for r in ctrl_results if r.get("ok"))
+
     # ── Summary ────────────────────────────────────────────────
 
     print_divider()
     ok_count = sum(1 for r in results if r["ok"])
     mifare_ok = sum(1 for r in mifare_results if r["ok"])
-    total = len(results) + len(mifare_results)
-    ok_total = ok_count + mifare_ok
+    ctrl_ok_count = ctrl_ok
+    total = len(results) + len(mifare_results) + len(ctrl_results)
+    ok_total = ok_count + mifare_ok + ctrl_ok_count
     print_info(f"\n  Results: {ok_total}/{total} tests returned data")
-    print_info(f"  Generic: {ok_count}/{len(results)}   MIFARE: {mifare_ok}/{len(mifare_results)}")
+    print_info(f"  Generic: {ok_count}/{len(results)}   MIFARE: {mifare_ok}/{len(mifare_results)}   Control: {ctrl_ok_count}/{len(ctrl_results)}")
     if ok_count:
         print_success(f"  Responding generic command IDs:")
         for r in results:
@@ -706,10 +771,16 @@ def cmd_device_probe(device: CopyKeyDevice) -> CommandResult:
         for r in mifare_results:
             if r["ok"]:
                 print_success(f"    {r['name']}: {r['detail']}")
+    if ctrl_ok_count:
+        print_success(f"  Responding control transfers:")
+        for r in ctrl_results:
+            if r.get("ok"):
+                label = r.get("type", "") + ":" + r.get("name", str(r.get("attempt", "")))
+                txt = r.get("text", "") or ""
+                print_success(f"    {label}: {txt[:100]}" if txt else f"    {label}: data")
     else:
-        if ok_count == 0:
+        if ok_count == 0 and mifare_ok == 0:
             print_error("  No responses from any transport or protocol.")
             print_warning("  Device may be output-only (text to LCD), not command-driven.")
-            print_warning("  Try running: icopyzed probe (passive read-only mode)")
 
-    return CommandResult(True, f"Probed {total} paths ({ok_total} responses: {ok_count} generic + {mifare_ok} mifare)")
+    return CommandResult(True, f"Probed {total} paths ({ok_total} responses)")

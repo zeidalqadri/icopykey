@@ -417,6 +417,28 @@ class CopyKeyDevice:
         except Exception:
             return None
 
+    def get_input_report(self) -> bytes | None:
+        """GET_REPORT control transfer — request input report via USB control pipe."""
+        if not self.device:
+            return None
+        try:
+            buf = self.device.get_input_report(0, 64)
+            return bytes(buf) if buf else None
+        except Exception as e:
+            logger.debug("get_input_report: %s", e)
+            return None
+
+    def send_feature_report(self, data: bytes) -> bool:
+        """SET_REPORT feature — send feature report via USB control pipe."""
+        if not self.device:
+            return False
+        try:
+            self.device.send_feature_report(data)
+            return True
+        except Exception as e:
+            logger.debug("send_feature_report: %s", e)
+            return False
+
     def write_read(self, data: bytes, timeout_ms: int = 5000) -> bytes | None:
         """Write 64-byte output report, read 64-byte input report response."""
         if not self.device:
@@ -604,6 +626,8 @@ MSG_WRITE_READ = 0x03
 MSG_GET_DESCRIPTOR = 0x04
 MSG_CLOSE = 0x05
 MSG_READ_ONLY = 0x06
+MSG_GET_INPUT_REPORT = 0x07
+MSG_SET_FEATURE_REPORT = 0x08
 HEADER_SIZE = 5  # 1 byte type + 4 bytes length BE
 
 
@@ -786,10 +810,7 @@ class CopyKeyRemoteDevice(CopyKeyDevice):
         return None  # no-op: actual read happens in write_read
 
     def read_only(self, timeout_ms: int = 2000) -> bytes | None:
-        """Passive read — listen without sending a command.
-
-        Useful for devices that stream data unprompted (output-only / LCD text).
-        """
+        """Passive read — listen without sending a command."""
         if not self._sock or not self._connected:
             return None
         payload = struct.pack(">I", timeout_ms)
@@ -802,6 +823,32 @@ class CopyKeyRemoteDevice(CopyKeyDevice):
         if len(response) < 1 or response[0] != 0x01:
             return None
         return response[1:] if len(response) > 1 else b""
+
+    def get_input_report(self) -> bytes | None:
+        """GET_REPORT control transfer — request input report via USB control pipe."""
+        if not self._sock or not self._connected:
+            return None
+        if not _send_frame(self._sock, MSG_GET_INPUT_REPORT, b""):
+            return None
+        frame = _recv_frame(self._sock, timeout=5.0)
+        if frame is None:
+            return None
+        _, response = frame
+        if len(response) < 1 or response[0] != 0x01:
+            return None
+        return response[1:] if len(response) > 1 else b""
+
+    def send_feature_report(self, data: bytes) -> bool:
+        """SET_REPORT feature — send feature report via USB control pipe."""
+        if not self._sock or not self._connected:
+            return False
+        payload = data[:HID_REPORT_SIZE]
+        if not _send_frame(self._sock, MSG_SET_FEATURE_REPORT, payload):
+            return False
+        frame = _recv_frame(self._sock, timeout=5.0)
+        if frame is None or len(frame[1]) < 1:
+            return False
+        return frame[1][0] == 0x01
 
     # ── Metadata ─────────────────────────────────────────────
 
