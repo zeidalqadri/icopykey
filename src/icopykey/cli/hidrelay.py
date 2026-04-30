@@ -137,12 +137,15 @@ class HIDDevice:
         buf = buf[:HID_REPORT_SIZE]
 
         try:
-            self.device.write(bytes(buf))
+            write_buf = bytes(buf)
+            if sys.platform == "win32":
+                write_buf = b"\x00" + write_buf  # Windows: prepend report ID
+            self.device.write(write_buf)
         except Exception as e:
             logger.error("HID write error: %s", e)
             return None
 
-        time.sleep(0.05)  # small gap for device processing
+        time.sleep(0.05)
 
         try:
             self.device.set_nonblocking(True)
