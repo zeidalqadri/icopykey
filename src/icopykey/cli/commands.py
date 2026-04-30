@@ -14,13 +14,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .operations import (
-    CopyKeyDevice,
-    CardOperations,
-    LocalLibrary,
-    MifareCard,
-    MifareSector,
-)
+from .constants import DEFAULT_KEYS
+from .device import CopyKeyDevice
+from .card_ops import CardOperations
+from .library import LocalLibrary
+from .mifare_data import MifareCard, MifareSector
 from .display import (
     print_success,
     print_error,
@@ -781,5 +779,80 @@ def cmd_device_probe(device: CopyKeyDevice) -> CommandResult:
         if ok_count == 0 and mifare_ok == 0:
             print_error("  No responses from any transport or protocol.")
             print_warning("  Device may be output-only (text to LCD), not command-driven.")
+
+    return results
+
+
+# ── crypto-1 key recovery ────────────────────────────────────────
+
+
+def cmd_crack_key(
+    device: CopyKeyDevice,
+    library: LocalLibrary,
+    sector: int | None = None,
+) -> CommandResult:
+    """Attempt to recover unknown MIFARE Classic keys.
+
+    Uses the device to brute-force known/default keys.  If a device that
+    supports raw auth NACK collection (e.g.  kopized daemon) is available,
+    falls back to darkside / nested key recovery.
+    """
+    from .crypto1_cipher import Crypto1
+
+    info = device.read_card_info()
+    if not info:
+        return CommandResult(success=False, error="Failed to read card info")
+
+    uid = info["uid"]
+    sak = info["sak"]
+    card_type = info["card_type"]
+    num_sectors = 40 if sak == 0x18 else 16
+    target_sectors = [sector] if sector is not None else list(range(num_sectors))
+
+    custom_keys = library.get_keys() if library else []
+    all_keys = list(DEFAULT_KEYS) + custom_keys
+
+    print_info(f"Card: UID={uid.hex().upper()}  Type={card_type}  Sectors={num_sectors}")
+    print_divider()
+
+    cracked: dict[int, bytes] = {}
+    locked: list[int] = []
+
+    for i in target_sectors:
+        found = False
+        for key in all_keys:
+            result = device.read_sector(i, key, key_type=0)
+            if result:
+                cracked[i] = result.key_a
+                print_success(f"  Sector {i:2d}  KeyA: {result.key_a.hex().upper()}")
+                found = True
+                break
+            result = device.read_sector(i, key, key_type=1)
+            if result:
+                cracked[i] = result.key_b
+                print_success(f"  Sector {i:2d}  KeyB: {result.key_b.hex().upper()}")
+                found = True
+                break
+        if not found:
+            locked.append(i)
+            print_warning(f"  Sector {i:2d}  LOCKED — no known key")
+
+    if cracked:
+        print_divider()
+        print_success(f"Cracked {len(cracked)}/{len(target_sectors)} sectors")
+        for sec, key in cracked.items():
+            library.add_key(f"cracked_sector_{sec}", key)
+
+    if locked:
+        print_warning(
+            f"{len(locked)} sector(s) still locked: {locked}"
+        )
+        print_info("For darkside/nested attack, use kopized or an external NFC reader.")
+
+    return CommandResult(
+        success=len(cracked) > 0,
+        data={"cracked": {s: k.hex() for s, k in cracked.items()}, "locked": locked},
+        error=f"{len(locked)} sector(s) locked" if locked else None,
+    )
 
     return CommandResult(True, f"Probed {total} paths ({ok_total} responses)")

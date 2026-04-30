@@ -3,20 +3,11 @@
 HID Relay Server — TCP bridge to a local HID device.
 
 Accepts a single TCP client and relays 64-byte output/input HID reports
-to/from a connected USB HID device.  Self-contained: depends only on
-stdlib + ``hidapi`` — zero imports from the ``icopykey`` package.
+to/from a connected USB HID device.  Protocol constants and frame helpers
+live in ``_relay_protocol.py`` (stdlib only).
 
 Run directly:   python3 hidrelay.py --port 9999 --vid 0x6300 --pid 0x1991
 Or via package: icopyzed relay-server --port 9999 --vid 0x6300 --pid 0x1991
-
-Protocol (binary, Big-Endian, length-prefixed frames):
-    FRAME:  [1 B type] [4 B payload_len] [payload...]
-
-    0x01  ENUMERATE       → JSON array of hid.enumerate() results
-    0x02  OPEN [path?]    → ok + JSON {mfr, product, serial, vid, pid}
-    0x03  WRITE_READ      → [4 B timeout_ms][64 B data] → [ok][0-64 B response]
-    0x04  GET_DESCRIPTOR  → raw HID report descriptor bytes
-    0x05  CLOSE           → close device, ready for next connection
 """
 
 from __future__ import annotations
@@ -37,67 +28,22 @@ try:
 except ImportError:
     HID_OK = False
 
+from ._relay_protocol import (
+    MSG_ENUMERATE,
+    MSG_OPEN,
+    MSG_WRITE_READ,
+    MSG_GET_DESCRIPTOR,
+    MSG_CLOSE,
+    MSG_READ_ONLY,
+    MSG_GET_INPUT_REPORT,
+    MSG_SET_FEATURE_REPORT,
+    HID_REPORT_SIZE,
+    HEADER_SIZE,
+    recv_frame,
+    send_frame,
+)
+
 logger = logging.getLogger("hidrelay")
-
-# ── Protocol constants ────────────────────────────────────────────
-
-MSG_ENUMERATE = 0x01
-MSG_OPEN = 0x02
-MSG_WRITE_READ = 0x03
-MSG_GET_DESCRIPTOR = 0x04
-MSG_CLOSE = 0x05
-MSG_READ_ONLY = 0x06  # passive read — no write, just listen
-MSG_GET_INPUT_REPORT = 0x07  # GET_REPORT control transfer (not interrupt read)
-MSG_SET_FEATURE_REPORT = 0x08  # SET_REPORT feature
-
-HID_REPORT_SIZE = 64
-HEADER_SIZE = 5  # 1 byte type + 4 bytes length
-
-
-def _recv_frame(sock: socket.socket, timeout: float = 30.0) -> tuple[int, bytes] | None:
-    """Receive a single framed message.
-
-    Returns (msg_type, payload) or None on timeout / connection close.
-    """
-    sock.settimeout(timeout)
-    try:
-        header = b""
-        while len(header) < HEADER_SIZE:
-            chunk = sock.recv(HEADER_SIZE - len(header))
-            if not chunk:
-                return None
-            header += chunk
-    except socket.timeout:
-        return None
-    except OSError:
-        return None
-
-    msg_type = header[0]
-    payload_len = struct.unpack(">I", header[1:5])[0]
-
-    if payload_len > 1_048_576:  # sanity cap: 1 MiB
-        logger.error("Payload too large: %d", payload_len)
-        return None
-
-    payload = b""
-    while len(payload) < payload_len:
-        chunk = sock.recv(payload_len - len(payload))
-        if not chunk:
-            return None
-        payload += chunk
-
-    return msg_type, payload
-
-
-def _send_frame(sock: socket.socket, msg_type: int, payload: bytes) -> bool:
-    """Send a framed message.  Returns True on success."""
-    header = struct.pack(">BI", msg_type, len(payload))
-    try:
-        sock.sendall(header + payload)
-        return True
-    except OSError as e:
-        logger.error("Send failed: %s", e)
-        return False
 
 
 # ── HID Device wrapper ────────────────────────────────────────────
@@ -239,7 +185,7 @@ def _handle_session(sock: socket.socket, vid: int, pid: int) -> None:
     logger.info("Client connected")
 
     while True:
-        frame = _recv_frame(sock, timeout=60.0)
+        frame = recv_frame(sock, timeout=60.0)
         if frame is None:
             logger.info("Client disconnected (EOF or timeout)")
             break
@@ -249,7 +195,7 @@ def _handle_session(sock: socket.socket, vid: int, pid: int) -> None:
         if msg_type == MSG_ENUMERATE:
             devices = dev.enumerate_all()
             json_data = json.dumps(devices, default=str).encode("utf-8")
-            _send_frame(sock, MSG_ENUMERATE, json_data)
+            send_frame(sock, MSG_ENUMERATE, json_data)
 
         elif msg_type == MSG_OPEN:
             path = payload if payload else None
@@ -265,17 +211,17 @@ def _handle_session(sock: socket.socket, vid: int, pid: int) -> None:
                         "pid": dev.pid,
                     }
                 ).encode("utf-8")
-                _send_frame(sock, MSG_OPEN, b"\x01" + info)
+                send_frame(sock, MSG_OPEN, b"\x01" + info)
             else:
-                _send_frame(sock, MSG_OPEN, b"\x00" + b"{}")
+                send_frame(sock, MSG_OPEN, b"\x00" + b"{}")
 
         elif msg_type == MSG_WRITE_READ:
             if not dev.is_open:
-                _send_frame(sock, MSG_WRITE_READ, b"\x00" + b"\x00" * HID_REPORT_SIZE)
+                send_frame(sock, MSG_WRITE_READ, b"\x00" + b"\x00" * HID_REPORT_SIZE)
                 continue
 
             if len(payload) < 4:
-                _send_frame(sock, MSG_WRITE_READ, b"\x00" + b"\x00" * HID_REPORT_SIZE)
+                send_frame(sock, MSG_WRITE_READ, b"\x00" + b"\x00" * HID_REPORT_SIZE)
                 continue
 
             timeout_ms = struct.unpack(">I", payload[:4])[0]
@@ -283,27 +229,27 @@ def _handle_session(sock: socket.socket, vid: int, pid: int) -> None:
 
             result = dev.write_read(data, timeout_ms)
             if result is not None:
-                _send_frame(sock, MSG_WRITE_READ, b"\x01" + result)
+                send_frame(sock, MSG_WRITE_READ, b"\x01" + result)
             else:
-                _send_frame(sock, MSG_WRITE_READ, b"\x00" + b"\x00" * HID_REPORT_SIZE)
+                send_frame(sock, MSG_WRITE_READ, b"\x00" + b"\x00" * HID_REPORT_SIZE)
 
         elif msg_type == MSG_GET_DESCRIPTOR:
             if not dev.is_open:
-                _send_frame(sock, MSG_GET_DESCRIPTOR, b"")
+                send_frame(sock, MSG_GET_DESCRIPTOR, b"")
                 continue
             desc = dev.get_descriptor()
             if desc is not None:
-                _send_frame(sock, MSG_GET_DESCRIPTOR, desc)
+                send_frame(sock, MSG_GET_DESCRIPTOR, desc)
             else:
-                _send_frame(sock, MSG_GET_DESCRIPTOR, b"")
+                send_frame(sock, MSG_GET_DESCRIPTOR, b"")
 
         elif msg_type == MSG_CLOSE:
             dev.close()
-            _send_frame(sock, MSG_CLOSE, b"\x01")
+            send_frame(sock, MSG_CLOSE, b"\x01")
 
         elif msg_type == MSG_READ_ONLY:
             if not dev.is_open:
-                _send_frame(sock, MSG_READ_ONLY, b"\x00" + b"\x00" * 64)
+                send_frame(sock, MSG_READ_ONLY, b"\x00" + b"\x00" * 64)
                 continue
             timeout_ms = 500
             if len(payload) >= 4:
@@ -312,39 +258,39 @@ def _handle_session(sock: socket.socket, vid: int, pid: int) -> None:
                 dev.device.set_nonblocking(True)
                 result = dev.device.read(HID_REPORT_SIZE, timeout_ms)
                 if result:
-                    _send_frame(sock, MSG_READ_ONLY, b"\x01" + bytes(result))
+                    send_frame(sock, MSG_READ_ONLY, b"\x01" + bytes(result))
                 else:
-                    _send_frame(sock, MSG_READ_ONLY, b"\x00" + b"\x00" * 64)
+                    send_frame(sock, MSG_READ_ONLY, b"\x00" + b"\x00" * 64)
             except Exception as e:
                 logger.debug("Passive read: %s", e)
-                _send_frame(sock, MSG_READ_ONLY, b"\x00" + b"\x00" * 64)
+                send_frame(sock, MSG_READ_ONLY, b"\x00" + b"\x00" * 64)
 
         elif msg_type == MSG_GET_INPUT_REPORT:
             if not dev.is_open:
-                _send_frame(sock, MSG_GET_INPUT_REPORT, b"\x00" + b"\x00" * 64)
+                send_frame(sock, MSG_GET_INPUT_REPORT, b"\x00" + b"\x00" * 64)
                 continue
             try:
                 report_id = 0
                 buf = dev.device.get_input_report(report_id, HID_REPORT_SIZE)
                 if buf and any(b != 0 for b in buf):
-                    _send_frame(sock, MSG_GET_INPUT_REPORT, b"\x01" + bytes(buf))
+                    send_frame(sock, MSG_GET_INPUT_REPORT, b"\x01" + bytes(buf))
                 else:
-                    _send_frame(sock, MSG_GET_INPUT_REPORT, b"\x00" + b"\x00" * 64)
+                    send_frame(sock, MSG_GET_INPUT_REPORT, b"\x00" + b"\x00" * 64)
             except Exception as e:
                 logger.debug("get_input_report: %s", e)
-                _send_frame(sock, MSG_GET_INPUT_REPORT, b"\x00" + b"\x00" * 64)
+                send_frame(sock, MSG_GET_INPUT_REPORT, b"\x00" + b"\x00" * 64)
 
         elif msg_type == MSG_SET_FEATURE_REPORT:
             if not dev.is_open:
-                _send_frame(sock, MSG_SET_FEATURE_REPORT, b"\x00")
+                send_frame(sock, MSG_SET_FEATURE_REPORT, b"\x00")
                 continue
             try:
                 data = payload[:HID_REPORT_SIZE] if len(payload) >= HID_REPORT_SIZE else payload
                 dev.device.send_feature_report(data)
-                _send_frame(sock, MSG_SET_FEATURE_REPORT, b"\x01")
+                send_frame(sock, MSG_SET_FEATURE_REPORT, b"\x01")
             except Exception as e:
                 logger.debug("send_feature_report: %s", e)
-                _send_frame(sock, MSG_SET_FEATURE_REPORT, b"\x00")
+                send_frame(sock, MSG_SET_FEATURE_REPORT, b"\x00")
 
         else:
             logger.warning("Unknown message type: 0x%02X", msg_type)

@@ -32,15 +32,10 @@ from pathlib import Path
 from .logger_setup import setup_logging
 from .config_manager import ConfigManager, AppConfig
 from .display import print_success, print_error, print_warning, print_info
-from .operations import (
-    HID_AVAILABLE,
-    DEVICE_VID,
-    DEVICE_PID,
-    CopyKeyDevice,
-    CopyKeyRemoteDevice,
-    CardOperations,
-    LocalLibrary,
-)
+from .constants import DEVICE_VID, DEVICE_PID
+from .library import LocalLibrary
+from .device import CopyKeyDevice, CopyKeyRemoteDevice, HID_AVAILABLE
+from .card_ops import CardOperations
 from .menus import run_main_menu
 
 logger = logging.getLogger("copykey_cli")
@@ -79,6 +74,7 @@ Examples:
     op_group = parser.add_argument_group("Operations")
     op_group.add_argument("--read", action="store_true", help="Read card info from device")
     op_group.add_argument("--decode", action="store_true", help="One-click decode all sectors")
+    op_group.add_argument("--crack", metavar="SECTOR", type=int, nargs="?", const=-1, help="Crack sector keys (all if no sector given)")
     op_group.add_argument("--list-cards", action="store_true", help="List stored cards")
     op_group.add_argument("--list-keys", action="store_true", help="List stored keys")
     op_group.add_argument("--device-info", action="store_true", help="Show device information")
@@ -277,6 +273,27 @@ def main(argv: list[str] | None = None) -> int:
         d.disconnect()
         return 0
 
+    if len(sys.argv) > 1 and sys.argv[1] == "crack":
+        import sys as _sys
+        _sys.argv.pop(1)
+        from .commands import cmd_crack_key
+        from .config_manager import ConfigManager as _CM
+        parser = build_parser()
+        args = parser.parse_args(_sys.argv[1:])
+        cfg = _CM().config
+        data_dir = Path(args.data_dir) if args.data_dir else Path(cfg.paths.vault_dir)
+        vault_pw = args.vault_password
+        library = LocalLibrary(data_dir, vault_password=vault_pw)
+
+        d = _create_device(args)
+        if not d.connect():
+            print("Device not found.", file=_sys.stderr)
+            return 1
+        sector = args.crack if args.crack != -1 else None
+        cmd_crack_key(d, library, sector=sector)
+        d.disconnect()
+        return 0
+
     if len(sys.argv) > 1 and sys.argv[1] == "descriptor":
         import sys as _sys
         if "--relay" in _sys.argv:
@@ -325,7 +342,7 @@ def main(argv: list[str] | None = None) -> int:
     # ── Determine mode ────────────────────────────────────
 
     has_batch_op = any([
-        args.read, args.decode, args.list_cards, args.list_keys,
+        args.read, args.decode, args.crack is not None, args.list_cards, args.list_keys,
         args.device_info, args.import_file, args.export_index is not None,
         args.delete_index is not None,
     ])

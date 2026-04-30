@@ -13,7 +13,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .operations import CopyKeyDevice, CardOperations, LocalLibrary
+from .device import CopyKeyDevice
+from .card_ops import CardOperations
+from .library import LocalLibrary
 from .commands import (
     CommandResult,
     cmd_read_card,

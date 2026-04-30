@@ -24,3 +24,6 @@ Thumbs.db
 *.exe
 *.dll
 *.so
+
+# USBPcap capture files
+*.pcapng
