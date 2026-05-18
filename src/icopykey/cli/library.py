@@ -136,7 +136,62 @@ class LocalLibrary:
             return None
         if fmt == "json":
             return json.dumps(card, indent=2).encode("utf-8")
+        if fmt in ("mfd", "bin"):
+            return cls._card_dict_to_raw_dump(card)
         return None
+
+    @staticmethod
+    def _card_dict_to_raw_dump(card: dict) -> bytes:
+        """Convert a card dict to raw MFD/BIN binary dump."""
+        buf = bytearray()
+        for sec in card.get("sectors", []):
+            for blk in sec.get("blocks", []):
+                buf.extend(bytes.fromhex(blk))
+        return bytes(buf)
+
+    @staticmethod
+    def _parse_raw_dump(data: bytes) -> dict | None:
+        """Parse a raw MFD/BIN dump into a card dict."""
+        total = len(data)
+        if total == 1024:
+            num_sectors, blocks_per = 16, 4
+            sak = 0x08
+            card_type = "MIFARE Classic 1K"
+        elif total == 4096:
+            num_sectors = 40
+            sak = 0x18
+            card_type = "MIFARE Classic 4K"
+        else:
+            logger.error("Unrecognised dump size: %d bytes (expected 1024 or 4096)", total)
+            return None
+
+        sectors = []
+        offset = 0
+        for i in range(num_sectors):
+            blk_count = 16 if i >= 32 else 4
+            blk_size = blk_count * 16
+            raw = data[offset : offset + blk_size]
+            blocks = [raw[j * 16 : (j + 1) * 16] for j in range(blk_count)]
+            trailer = blocks[-1]
+            sector = {
+                "index": i,
+                "key_a": trailer[0:6].hex(),
+                "access_bits": trailer[6:10].hex(),
+                "key_b": trailer[10:16].hex(),
+                "blocks": [b.hex() for b in blocks],
+            }
+            sectors.append(sector)
+            offset += blk_size
+
+        return {
+            "uid": "00" * 4,
+            "sak": sak,
+            "atqa": "0400",
+            "card_type": card_type,
+            "created": datetime.now().isoformat(),
+            "modified": datetime.now().isoformat(),
+            "sectors": sectors,
+        }
 
     def import_card(self, data: bytes, fmt: str = "json") -> str | None:
         try:
@@ -147,6 +202,13 @@ class LocalLibrary:
                     return None
                 card = MifareCard.from_dict(card_data)
                 name = card_data.get("name", f"Imported_{card.uid_hex}")
+                return self.add_card(card, name)
+            if fmt in ("mfd", "bin"):
+                card_data = self._parse_raw_dump(data)
+                if card_data is None:
+                    return None
+                card = MifareCard.from_dict(card_data)
+                name = f"Imported_{card.uid_hex}"
                 return self.add_card(card, name)
         except Exception as e:
             logger.error("Import failed: %s", e)

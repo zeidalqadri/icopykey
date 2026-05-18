@@ -270,14 +270,58 @@ class CopyKeyDevice:
             return None
 
         try:
-            uid = payload[5:12].hex()
+            uid_bytes = payload[5:12]
             sak = payload[12]
             atqa = payload[13:15]
-            card_type = "MIFARE Classic 1K" if sak == 0x08 else "MIFARE Classic 4K"
-            return {"uid": uid, "sak": sak, "atqa": atqa.hex(), "card_type": card_type}
+            # NTAG / Ultralight cards often have SAK=0x00, 7-byte UID
+            if sak == 0x00 and len(uid_bytes) == 7:
+                card_type = "NTAG/Ultralight EV1"
+            elif sak == 0x18:
+                card_type = "MIFARE Classic 4K"
+            elif sak == 0x08:
+                card_type = "MIFARE Classic 1K"
+            elif sak in (0x03, 0x04):
+                card_type = "DESFire"
+            else:
+                card_type = "Unknown"
+            return {"uid": uid_bytes, "sak": sak, "atqa": atqa.hex(), "card_type": card_type}
         except Exception as e:
             logger.error("Failed to parse card info from probe: %s", e)
             return None
+
+    def read_ntag_pages(self, start_page: int = 0, count: int = 45) -> list[bytes] | None:
+        """Read NTAG pages (4 bytes each) from the device.
+        
+        Uses the bulk data channel (F8) to read a range of pages.
+        """
+        if not self.is_connected():
+            return None
+        pages: list[bytes] = []
+        # Try to use F8 bulk read for pages; fall back to sector-like reads
+        if not self._session_key:
+            if not self.sync_session_key():
+                logger.warning("Cannot sync session key for NTAG page read")
+                return None
+            if not self.send_session_init():
+                logger.warning("Cannot init F8 session for NTAG page read")
+                return None
+        # Read pages in batches
+        for base in range(start_page, start_page + count, 8):
+            frame = build_bulk_read_frame(base, b"\xff" * 6, self._session_key)
+            resp = self.write_read(frame, timeout_ms=3000)
+            if not resp or len(resp) < REPORT_SIZE:
+                continue
+            try:
+                payload = parse_report(resp)
+            except ValueError:
+                continue
+            rtype = classify_payload(payload)
+            if rtype in ("bulk_data", "bulk_data_ack"):
+                # Bulk data payload contains page data at bytes 8-20
+                raw = bytes(payload[8:])
+                for i in range(0, min(len(raw), 12), 4):
+                    pages.append(raw[i:i+4])
+        return pages if pages else None
 
     def read_sector(self, sector_index: int, key: bytes, key_type: int = 0x60) -> MifareSector | None:
         """Read a sector using the real protocol (CMD 0xC9).

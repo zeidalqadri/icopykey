@@ -71,17 +71,34 @@ def cmd_read_card(ops: CardOperations) -> CommandResult:
         print_error("Failed to read card info. Ensure a card is on the reader.")
         return CommandResult(False, error="No card detected")
 
-    uid = info["uid"].hex().upper()
+    uid_hex = info["uid"].hex().upper() if isinstance(info["uid"], bytes) else info["uid"]
     sak = info["sak"]
-    atqa = info["atqa"].hex().upper()
+    atqa_val = info["atqa"]
+    atqa_hex = atqa_val.hex().upper() if isinstance(atqa_val, bytes) else atqa_val
     card_type = info["card_type"]
 
-    print_card_info(uid, sak, atqa, card_type)
-    return CommandResult(True, f"Card {uid} detected", data=info)
+    print_card_info(uid_hex, sak, atqa_hex, card_type)
+    return CommandResult(True, f"Card {uid_hex} detected", data=info)
 
 
 def cmd_decode_card(ops: CardOperations, library: LocalLibrary) -> CommandResult:
     """One-click decode all sectors."""
+    # Check card type first for NTAG vs MIFARE dispatch
+    info = ops.read_card_info()
+    if not info:
+        print_error("Failed to read card info.")
+        return CommandResult(False, error="No card detected")
+
+    if info["card_type"].startswith("NTAG"):
+        with spinning("Reading NTAG pages"):
+            ntag = ops.decode_ntag()
+        if not ntag:
+            print_error("Failed to decode NTAG card.")
+            return CommandResult(False, error="NTAG decode failed")
+        print_success(f"NTAG {ntag.ntag_type}: {len(ntag.pages)} pages read")
+        print_info(f"UID: {ntag.uid_hex}")
+        return CommandResult(True, f"NTAG {ntag.ntag_type} decoded", data=ntag)
+
     custom_keys = library.get_keys() if library.keys else None
     print_info(f"Decoding card with {len(custom_keys) + 10 if custom_keys else 10} keys...")
 
@@ -262,8 +279,16 @@ def cmd_export_card(library: LocalLibrary, index: int, output_dir: str = ".") ->
     return CommandResult(True, f"Exported to {out_path}")
 
 
+def _detect_import_fmt(path: Path) -> str:
+    """Detect card import format from file extension."""
+    ext = path.suffix.lower()
+    if ext in (".mfd", ".bin", ".dump"):
+        return ext.lstrip(".")
+    return "json"
+
+
 def cmd_import_card(
-    library: LocalLibrary, ops: CardOperations, filepath: str, fmt: str = "json"
+    library: LocalLibrary, ops: CardOperations, filepath: str, fmt: str | None = None
 ) -> CommandResult:
     """Import a card from a file into the library."""
     try:
@@ -271,6 +296,8 @@ def cmd_import_card(
     except Exception as e:
         print_error(str(e))
         return CommandResult(False, error=str(e))
+
+    fmt = fmt or _detect_import_fmt(path)
 
     try:
         data = path.read_bytes()
@@ -790,14 +817,15 @@ def cmd_crack_key(
     device: CopyKeyDevice,
     library: LocalLibrary,
     sector: int | None = None,
+    use_external_reader: bool = False,
 ) -> CommandResult:
     """Attempt to recover unknown MIFARE Classic keys.
 
-    Uses the device to brute-force known/default keys.  If a device that
-    supports raw auth NACK collection (e.g.  kopized daemon) is available,
-    falls back to darkside / nested key recovery.
+    Uses the device to brute-force known/default keys.  If *use_external_reader*
+    is True, attempts further recovery (darkside / nested) via an external NFC
+    reader for any remaining locked sectors.
     """
-    from .crypto1_cipher import Crypto1
+    from .nfc_reader import PcscReader
 
     info = device.read_card_info()
     if not info:
@@ -837,17 +865,30 @@ def cmd_crack_key(
             locked.append(i)
             print_warning(f"  Sector {i:2d}  LOCKED — no known key")
 
+    # ── External reader fallback ──────────────────────────────────────
+    if locked and use_external_reader:
+        print_divider()
+        print_info("Attempting external NFC reader for remaining locked sectors...")
+        pcsc = PcscReader()
+        if pcsc.available and pcsc.connect():
+            print_success("  External reader connected")
+            _crack_with_external_reader(
+                pcsc, uid, locked, cracked, library, print_info, print_success, print_warning
+            )
+            pcsc.disconnect()
+        else:
+            print_warning("  External reader not available")
+    elif locked and not use_external_reader:
+        print_warning(
+            f"{len(locked)} sector(s) still locked: {locked}"
+        )
+        print_info("Use --reader to attempt recovery via external NFC reader.")
+
     if cracked:
         print_divider()
         print_success(f"Cracked {len(cracked)}/{len(target_sectors)} sectors")
         for sec, key in cracked.items():
             library.add_key(f"cracked_sector_{sec}", key)
-
-    if locked:
-        print_warning(
-            f"{len(locked)} sector(s) still locked: {locked}"
-        )
-        print_info("For darkside/nested attack, use kopized or an external NFC reader.")
 
     return CommandResult(
         success=len(cracked) > 0,
@@ -855,4 +896,64 @@ def cmd_crack_key(
         error=f"{len(locked)} sector(s) locked" if locked else None,
     )
 
-    return CommandResult(True, f"Probed {total} paths ({ok_total} responses)")
+
+def _crack_with_external_reader(
+    reader: Any,
+    uid: bytes,
+    locked_sectors: list[int],
+    cracked: dict[int, bytes],
+    library: Any,
+    _print_info: Any,
+    _print_success: Any,
+    _print_warning: Any,
+) -> None:
+    """Try darkside/nested attack via external reader for locked sectors."""
+    from .crypto1_attack import DarksideAttack, NestedAttack
+
+    # Collect encrypted nonces from locked sectors (approximate — real
+    # readers typically don't expose raw nonces through APDU; this step
+    # would need a modified reader firmware).
+    for sec in locked_sectors[:]:
+        if sec in cracked:
+            continue
+
+        # Try darkside attack if we can collect encrypted nonces
+        attack = DarksideAttack()
+        attack.set_uid(uid)
+
+        # Add any already-cracked keys for potential nested attack
+        for known_sec, known_key in cracked.items():
+            attack.add_known_key(known_sec, known_key)
+
+        # Collect encrypted nonces (external reader specific)
+        # This is a placeholder — actual implementation depends on
+        # the reader firmware exposing raw auth data.
+        encrypted_nonces = reader.collect_encrypted_nonces(
+            block=sec * 4, num_attempts=256
+        )
+        if len(encrypted_nonces) >= 2:
+            for nt in encrypted_nonces:
+                attack.add_nonce(sec, nt, b"\x00" * 4)
+            key = attack.recover_key(sec)
+            if key:
+                # Verify against real device
+                result = reader.read_sector(sec, key, 0)
+                if result:
+                    cracked[sec] = key
+                    _print_success(f"  Sector {sec:2d}  KeyA (ext): {key.hex().upper()}")
+                    continue
+
+        # Try nested attack with known keys
+        if cracked:
+            nested = NestedAttack()
+            nested.set_uid(uid)
+            for known_sec, known_key in cracked.items():
+                nested.add_known_key(known_sec, known_key)
+            for nt in encrypted_nonces:
+                nested.add_encrypted_trace(sec, nt, b"\x00" * 4)
+            key = nested.recover_key(sec)
+            if key:
+                result = reader.read_sector(sec, key, 0)
+                if result:
+                    cracked[sec] = key
+                    _print_success(f"  Sector {sec:2d}  KeyA (nested): {key.hex().upper()}")

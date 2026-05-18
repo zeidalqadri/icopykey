@@ -93,6 +93,7 @@ Examples:
     opt_group.add_argument("--vault-password", metavar="PASS", help="Vault password (prefer interactive prompt)")
     opt_group.add_argument("--data-dir", metavar="DIR", help="Override data directory (default: ~/.copykey_cli)")
     opt_group.add_argument("--relay", metavar="HOST:PORT", help="Connect via TCP relay (e.g. localhost:9999)")
+    opt_group.add_argument("--reader", action="store_true", help="Use external NFC reader for darkside/nested attack")
     opt_group.add_argument("--version", action="version", version="copykey-cli 2.1.0")
 
     return parser
@@ -290,7 +291,8 @@ def main(argv: list[str] | None = None) -> int:
             print("Device not found.", file=_sys.stderr)
             return 1
         sector = args.crack if args.crack != -1 else None
-        cmd_crack_key(d, library, sector=sector)
+        use_reader = getattr(args, "reader", False)
+        cmd_crack_key(d, library, sector=sector, use_external_reader=use_reader)
         d.disconnect()
         return 0
 

@@ -8,7 +8,7 @@ from typing import Any
 
 from .constants import DEFAULT_KEYS
 from .device import CopyKeyDevice
-from .mifare_data import MifareCard
+from .mifare_data import MifareCard, NtagCard
 
 logger = logging.getLogger("copykey_cli.card_ops")
 
@@ -69,6 +69,26 @@ class CardOperations:
             logger.warning(
                 "[!] %d sector(s) remain locked: %s", len(locked_sectors), locked_sectors
             )
+        return card
+
+    def decode_ntag(self, show_progress: bool = True) -> NtagCard | None:
+        """Decode an NTAG / Ultralight card by reading all pages."""
+        info = self.read_card_info()
+        if not info:
+            logger.error("Failed to read card info")
+            return None
+        uid = info["uid"]
+        uid_hex = uid.hex().upper()
+        if show_progress:
+            logger.info("[*] Reading NTAG card UID: %s", uid_hex)
+        pages = self.device.read_ntag_pages()
+        if not pages:
+            logger.error("Failed to read NTAG pages")
+            return None
+        card = NtagCard.from_pages(uid, pages)
+        self.current_card = None  # NTAG not compatible with MifareCard
+        if show_progress:
+            logger.info("[+] NTAG %s: %d pages read", card.ntag_type, len(pages))
         return card
 
     def encrypt_card_data(

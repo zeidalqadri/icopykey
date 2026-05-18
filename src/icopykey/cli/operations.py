@@ -23,7 +23,7 @@ from .constants import (
     DEFAULT_KEYS,
 )
 from .vault import AESVault, CRYPTO_AVAILABLE
-from .mifare_data import MifareSector, MifareCard
+from .mifare_data import MifareSector, MifareCard, NtagCard, DesfireCard
 from .device import CopyKeyDevice, CopyKeyRemoteDevice, HID_AVAILABLE
 from .card_ops import CardOperations
 from .library import LocalLibrary
