@@ -205,6 +205,125 @@ def auto_nonce_source() -> NonceSource | None:
     return None
 
 
+# ── Key-recovery backends (direct mfcuk/mfoc invocation) ──────────────────
+
+
+class KeyRecoverySource(ABC):
+    """A backend that recovers a MIFARE Classic sector key end-to-end.
+
+    Distinct from :class:`NonceSource` (which only captures nonces and
+    leaves the actual cryptographic recovery to the caller).  A
+    ``KeyRecoverySource`` runs the full attack and returns the 6-byte
+    key directly.
+    """
+
+    name: str = "base"
+
+    @property
+    @abstractmethod
+    def available(self) -> bool:
+        """True if this source is usable (binary on PATH)."""
+
+    @abstractmethod
+    def recover_sector(
+        self,
+        sector: int,
+        *,
+        key_type: int = 0x60,
+        known_keys: list[bytes] | None = None,
+        timeout: float = 600.0,
+    ) -> bytes | None:
+        """Run the attack and return the recovered 6-byte key, or None."""
+
+
+class LibNfcCLIKeyRecovery(KeyRecoverySource):
+    """Drive ``mfcuk -R`` (libnfc darkside attack) and parse the recovered key.
+
+    ``mfcuk -R <block>:<A|B>`` runs the full darkside attack against a
+    sector and prints the recovered key on success.  This wraps the
+    subprocess invocation and parses the canonical
+    ``INFO: block <n> recovered KEY: <12hex>`` line from stdout.
+
+    Requires ``mfcuk`` on ``$PATH``; see ``docs/hardware_attacks.md``
+    for install instructions.
+    """
+
+    name = "libnfc-mfcuk-R"
+    BINARY = "mfcuk"
+    # mfcuk emits:  "INFO: block 4 recovered KEY: a0a1a2a3a4a5"
+    KEY_RE = re.compile(
+        r"INFO:\s*block\s*(\d+)\s*recovered\s*KEY:\s*([0-9A-Fa-f]{12})"
+    )
+
+    @property
+    def available(self) -> bool:
+        return shutil.which(self.BINARY) is not None
+
+    def recover_sector(
+        self,
+        sector: int,
+        *,
+        key_type: int = 0x60,
+        known_keys: list[bytes] | None = None,
+        timeout: float = 600.0,
+    ) -> bytes | None:
+        if not self.available:
+            return None
+        block = sector * 4
+        key_char = "A" if key_type == 0x60 else "B"
+        cmd = [self.BINARY, "-C", "-R", f"{block}:{key_char}"]
+        for k in known_keys or ():
+            if len(k) == 6:
+                cmd += ["-d", k.hex().upper()]
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout, check=False
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            logger.warning("%s: %s", self.name, exc)
+            return None
+        if proc.returncode != 0 and not proc.stdout:
+            logger.warning(
+                "%s exited %d: %s",
+                self.name,
+                proc.returncode,
+                proc.stderr.strip(),
+            )
+            return None
+        match = self.KEY_RE.search(proc.stdout)
+        if not match:
+            logger.info(
+                "%s did not produce a recovered key for block %d",
+                self.name,
+                block,
+            )
+            return None
+        try:
+            key = bytes.fromhex(match.group(2))
+        except ValueError:
+            return None
+        if len(key) != 6:
+            return None
+        logger.info(
+            "%s recovered key for sector %d: %s", self.name, sector, key.hex().upper()
+        )
+        return key
+
+
+_KEY_RECOVERY_CLASSES: tuple[type[KeyRecoverySource], ...] = (
+    LibNfcCLIKeyRecovery,
+)
+
+
+def auto_key_recovery_source() -> KeyRecoverySource | None:
+    """Return the first available :class:`KeyRecoverySource`, or None."""
+    for cls in _KEY_RECOVERY_CLASSES:
+        src = cls()
+        if src.available:
+            return src
+    return None
+
+
 class NfcReader(ABC):
     """Abstract base for NFC readers capable of raw MIFARE auth capture."""
 

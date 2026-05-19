@@ -74,9 +74,13 @@ Two integration points are wired into `icopyzed`:
 icopyzed crack --reader
 ```
 
-This calls `LibNfcCLINonceSource` (`src/icopykey/cli/nfc_reader.py`)
-which shells out to `mfcuk -C -R <block>:<keytype>` and parses the
-`Nt = 0x...` lines from stdout. No intermediate files.
+This calls `LibNfcCLIKeyRecovery` (`src/icopykey/cli/nfc_reader.py`)
+which runs `mfcuk -R <block>:<A|B>` for each locked sector. mfcuk does
+the full darkside attack and returns the recovered key directly via
+its canonical stdout line `INFO: block N recovered KEY: <12hex>`,
+which we parse. Already-cracked keys are forwarded as `-d` arguments
+to give mfcuk a head start. The recovered key is verified against the
+reader (via `read_sector`) before being committed to the library.
 
 **Option B — offline trace + `--from-trace`** (for debugging or batch):
 

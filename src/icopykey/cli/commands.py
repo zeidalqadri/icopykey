@@ -907,56 +907,45 @@ def _crack_with_external_reader(
     _print_success: Any,
     _print_warning: Any,
 ) -> None:
-    """Try darkside/nested attack via external reader for locked sectors."""
-    from .crypto1_attack import DarksideAttack, NestedAttack
+    """Recover locked-sector keys by shelling out to mfcuk.
 
-    # Collect encrypted nonces from locked sectors (approximate — real
-    # readers typically don't expose raw nonces through APDU; this step
-    # would need a modified reader firmware).
+    Calls :class:`LibNfcCLIKeyRecovery` (which runs ``mfcuk -R``) once
+    per locked sector.  ``mfcuk`` does the full darkside attack and
+    returns the recovered key directly — far more reliable than
+    capturing nonces and running the (currently broken) in-house
+    crypto1_attack recovery.
+    """
+    from .nfc_reader import auto_key_recovery_source
+
+    recovery = auto_key_recovery_source()
+    if recovery is None:
+        _print_warning(
+            "  No key-recovery backend available. Install `mfcuk` (libnfc)."
+        )
+        return
+
+    _print_info(f"  Using {recovery.name} for darkside recovery")
+    known_keys = list(cracked.values())
+
     for sec in locked_sectors[:]:
         if sec in cracked:
             continue
-
-        # Try darkside attack if we can collect encrypted nonces
-        attack = DarksideAttack()
-        attack.set_uid(uid)
-
-        # Add any already-cracked keys for potential nested attack
-        for known_sec, known_key in cracked.items():
-            attack.add_known_key(known_sec, known_key)
-
-        # Collect encrypted nonces (external reader specific)
-        # This is a placeholder — actual implementation depends on
-        # the reader firmware exposing raw auth data.
-        encrypted_nonces = reader.collect_encrypted_nonces(
-            block=sec * 4, num_attempts=256
-        )
-        if len(encrypted_nonces) >= 2:
-            for nt in encrypted_nonces:
-                attack.add_nonce(sec, nt, b"\x00" * 4)
-            key = attack.recover_key(sec)
-            if key:
-                # Verify against real device
-                result = reader.read_sector(sec, key, 0)
-                if result:
-                    cracked[sec] = key
-                    _print_success(f"  Sector {sec:2d}  KeyA (ext): {key.hex().upper()}")
-                    continue
-
-        # Try nested attack with known keys
-        if cracked:
-            nested = NestedAttack()
-            nested.set_uid(uid)
-            for known_sec, known_key in cracked.items():
-                nested.add_known_key(known_sec, known_key)
-            for nt in encrypted_nonces:
-                nested.add_encrypted_trace(sec, nt, b"\x00" * 4)
-            key = nested.recover_key(sec)
-            if key:
-                result = reader.read_sector(sec, key, 0)
-                if result:
-                    cracked[sec] = key
-                    _print_success(f"  Sector {sec:2d}  KeyA (nested): {key.hex().upper()}")
+        for key_type, label in ((0x60, "KeyA"), (0x61, "KeyB")):
+            key = recovery.recover_sector(
+                sec, key_type=key_type, known_keys=known_keys
+            )
+            if not key:
+                continue
+            # Verify against the device before claiming success.
+            verify = reader.read_sector(sec, key, key_type)
+            if verify:
+                cracked[sec] = key
+                if library is not None:
+                    library.add_key(f"cracked_sector_{sec}", key)
+                _print_success(
+                    f"  Sector {sec:2d}  {label} (mfcuk): {key.hex().upper()}"
+                )
+                break
 
 
 # ── Offline trace-based crack ────────────────────────────────────

@@ -8,11 +8,14 @@ from unittest.mock import patch
 import pytest
 
 from icopykey.cli.nfc_reader import (
+    KeyRecoverySource,
+    LibNfcCLIKeyRecovery,
     LibNfcCLINonceSource,
     NfcReader,
     NfcpyNonceSource,
     NonceSource,
     PcscReader,
+    auto_key_recovery_source,
     auto_nonce_source,
     create_reader,
 )
@@ -189,3 +192,151 @@ def test_pcsc_collect_nonces_delegates_to_auto_source() -> None:
         )
     assert nonces == [b"\x12\x34\x56\x78", b"\x9a\xbc\xde\xf0"]
     assert captured == {"sector": 5, "num": 64, "known_key": b"\xff" * 6}
+
+
+# ── KeyRecoverySource backends (mfcuk -R) ────────────────────────────────
+
+
+def test_key_recovery_source_abstract() -> None:
+    """KeyRecoverySource cannot be instantiated directly."""
+    with pytest.raises(TypeError):
+        KeyRecoverySource()  # type: ignore[abstract]
+
+
+def test_libnfc_recovery_available_uses_path() -> None:
+    src = LibNfcCLIKeyRecovery()
+    with patch("icopykey.cli.nfc_reader.shutil.which", return_value=None):
+        assert src.available is False
+    with patch("icopykey.cli.nfc_reader.shutil.which", return_value="/usr/bin/mfcuk"):
+        assert src.available is True
+
+
+def test_libnfc_recovery_returns_none_when_unavailable() -> None:
+    src = LibNfcCLIKeyRecovery()
+    with patch("icopykey.cli.nfc_reader.shutil.which", return_value=None):
+        assert src.recover_sector(sector=4) is None
+
+
+def test_libnfc_recovery_parses_canonical_output() -> None:
+    """mfcuk's INFO: block N recovered KEY: <hex> line is parsed."""
+    src = LibNfcCLIKeyRecovery()
+    fake_stdout = (
+        "[*] Setting up nfc reader...\n"
+        "[*] Probing tag for block 16:A ...\n"
+        "INFO: block 16 recovered KEY: a0a1a2a3a4a5\n"
+        "[*] Done.\n"
+    )
+    fake_proc = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=fake_stdout, stderr=""
+    )
+    with (
+        patch.object(LibNfcCLIKeyRecovery, "available", new=True),
+        patch("icopykey.cli.nfc_reader.subprocess.run", return_value=fake_proc),
+    ):
+        key = src.recover_sector(sector=4)
+    assert key == bytes.fromhex("a0a1a2a3a4a5")
+
+
+def test_libnfc_recovery_returns_none_on_no_key_line() -> None:
+    """Output without the canonical INFO line yields None, not a crash."""
+    src = LibNfcCLIKeyRecovery()
+    fake_proc = subprocess.CompletedProcess(
+        args=[], returncode=1, stdout="some unrelated output\n", stderr="failure"
+    )
+    with (
+        patch.object(LibNfcCLIKeyRecovery, "available", new=True),
+        patch("icopykey.cli.nfc_reader.subprocess.run", return_value=fake_proc),
+    ):
+        key = src.recover_sector(sector=4)
+    assert key is None
+
+
+def test_libnfc_recovery_passes_known_keys_as_d_flags() -> None:
+    """Known keys should be forwarded as repeated -d <hex> arguments."""
+    src = LibNfcCLIKeyRecovery()
+    fake_stdout = "INFO: block 0 recovered KEY: ffffffffffff\n"
+    fake_proc = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=fake_stdout, stderr=""
+    )
+    captured_cmd: dict[str, list[str]] = {}
+
+    def fake_run(cmd, **_kwargs):
+        captured_cmd["cmd"] = cmd
+        return fake_proc
+
+    with (
+        patch.object(LibNfcCLIKeyRecovery, "available", new=True),
+        patch("icopykey.cli.nfc_reader.subprocess.run", side_effect=fake_run),
+    ):
+        key = src.recover_sector(
+            sector=0,
+            known_keys=[bytes.fromhex("a0a1a2a3a4a5"), bytes.fromhex("b0b1b2b3b4b5")],
+        )
+    assert key == bytes.fromhex("ffffffffffff")
+    cmd = captured_cmd["cmd"]
+    # -d KEY pairs for each known key, plus -R 0:A
+    assert "-R" in cmd and "0:A" in cmd
+    d_indices = [i for i, a in enumerate(cmd) if a == "-d"]
+    assert len(d_indices) == 2
+    assert cmd[d_indices[0] + 1] == "A0A1A2A3A4A5"
+    assert cmd[d_indices[1] + 1] == "B0B1B2B3B4B5"
+
+
+def test_libnfc_recovery_handles_timeout() -> None:
+    src = LibNfcCLIKeyRecovery()
+    with (
+        patch.object(LibNfcCLIKeyRecovery, "available", new=True),
+        patch(
+            "icopykey.cli.nfc_reader.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="mfcuk", timeout=1),
+        ),
+    ):
+        assert src.recover_sector(sector=4) is None
+
+
+def test_auto_key_recovery_source_picks_available() -> None:
+    """auto_key_recovery_source returns the first available backend."""
+
+    class FakeAvailable(KeyRecoverySource):
+        name = "fake"
+
+        @property
+        def available(self) -> bool:
+            return True
+
+        def recover_sector(
+            self,
+            sector: int,
+            *,
+            key_type: int = 0x60,
+            known_keys: list[bytes] | None = None,
+            timeout: float = 600.0,
+        ) -> bytes | None:
+            return bytes.fromhex("ffffffffffff")
+
+    with patch("icopykey.cli.nfc_reader._KEY_RECOVERY_CLASSES", (FakeAvailable,)):
+        src = auto_key_recovery_source()
+    assert src is not None
+    assert src.recover_sector(4) == bytes.fromhex("ffffffffffff")
+
+
+def test_auto_key_recovery_source_none_when_unavailable() -> None:
+    class FakeUnavailable(KeyRecoverySource):
+        name = "fake"
+
+        @property
+        def available(self) -> bool:
+            return False
+
+        def recover_sector(
+            self,
+            sector: int,
+            *,
+            key_type: int = 0x60,
+            known_keys: list[bytes] | None = None,
+            timeout: float = 600.0,
+        ) -> bytes | None:
+            return None
+
+    with patch("icopykey.cli.nfc_reader._KEY_RECOVERY_CLASSES", (FakeUnavailable,)):
+        assert auto_key_recovery_source() is None
