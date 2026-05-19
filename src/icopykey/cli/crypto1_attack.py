@@ -9,6 +9,40 @@ References:
     - Garcia et al., "Wirelessly Pickpocketing a Mifare Classic Card"
       (IEEE S&P 2009) — darkside attack
     - Hardnested: https://github.com/nfc-tools/mfoc-hardnested
+
+.. warning::
+
+   **Current status (2026-05-19): the key-recovery code in this module
+   is structurally incomplete and does not produce correct keys
+   end-to-end.**
+
+   Specifically:
+
+   * :func:`lfsr_rollback_word` cannot exactly invert
+     :func:`crypto1_word` for a full 32-bit cycle — the odd register is
+     24 bits wide and shifted-out bits are lost.  The xfail'd
+     ``test_lfsr_rollback_word`` documents this.
+   * :func:`lfsr_recovery32` returns ~65k candidate cipher states but
+     does not isolate the correct one without extra verification data.
+   * Consequently :func:`recover_key_from_keystream`, the public
+     :class:`DarksideAttack`, and the :class:`NestedAttack` cannot
+     recover real keys.  See the xfail'd
+     ``test_recover_key_from_keystream_round_trip`` for evidence.
+
+   Until the linear LFSR-inversion machinery from ``crapto1.c``
+   (specifically ``lfsr_recovery_state_from_keystream`` plus the
+   parity-correlation tables) is ported, callers should:
+
+   * use the dictionary attack (:func:`commands.cmd_crack_key` without
+     ``--reader``) for cards with known/default keys, OR
+   * delegate recovery to ``mfcuk`` / ``mfoc`` via
+     :class:`icopykey.cli.nfc_reader.LibNfcCLINonceSource`.
+
+   The cipher conventions also disagree across files: this module's
+   :func:`crypto1_word` and :func:`_ks32_for` use the canonical
+   ``_bebit``-based (MSB-first) bit feeding, but
+   :meth:`icopykey.cli.crypto1_cipher.Crypto1.init_with_tag` feeds bits
+   LSB-first.  Reconciling them is a separate task.
 """
 
 from __future__ import annotations
@@ -354,6 +388,29 @@ def recover_key_from_keystream(
 ) -> list[bytes]:
     """Recover candidate 6-byte keys from keystream + nonce data.
 
+    .. warning::
+
+       **This function does not currently produce correct keys on its
+       own.** :func:`lfsr_recovery32` returns up to ~65k candidate
+       states, none of which round-trip back to the cipher state at any
+       known position, and :func:`lfsr_rollback_word` cannot exactly
+       invert :func:`crypto1_word` for a full 32-bit cycle (see the
+       xfail'd ``test_lfsr_rollback_word`` and the new
+       ``test_recover_key_from_keystream_round_trip``).
+
+       Correct recovery requires porting the linear LFSR-inversion
+       machinery from ``crapto1.c`` (e.g.
+       ``lfsr_recovery_state_from_keystream`` plus the precomputed
+       parity-correlation tables).  Until that lands, callers should
+       use the dictionary attack (:func:`commands.cmd_crack_key` without
+       ``--reader``) or delegate to an external tool like ``mfcuk`` via
+       the :class:`LibNfcCLINonceSource` backend.
+
+    This function is preserved as-is for compatibility with existing
+    callers (notably :class:`DarksideAttack` / :class:`NestedAttack`,
+    which themselves do not produce verified keys against real cards
+    today).
+
     Parameters
     ----------
     ks : int (32-bit)
@@ -366,8 +423,8 @@ def recover_key_from_keystream(
     Returns
     -------
     list[bytes]
-        Possible 6-byte keys (may contain false positives; verify against
-        the device).
+        Candidate 6-byte keys (currently never the correct one — see
+        warning above).
     """
     uid_int = int.from_bytes(uid[:4], "little")
     in_val = uid_int ^ tag_nonce
@@ -1222,22 +1279,27 @@ class NestedAttack:
 
 def _ks32_for(key: bytes, uid: bytes, nt: int) -> int:
     """Return the 32 keystream bits the cipher emits while encrypting *nt*
-    under ``init(key) → feed UID → feed NT``.  Used to invert ``{nt}`` to
-    its plaintext when only the cipher state would otherwise be known."""
+    under ``init(key) → feed UID → feed NT``.
+
+    Uses the canonical ``crypto1_word`` feeding convention (MSB-first
+    via ``_bebit``) for both UID and NT.
+
+    .. note::
+
+       This matches the convention used by :func:`lfsr_recovery32`,
+       :func:`crypto1_word`, and the rest of the recovery code.  It
+       does **not** match :meth:`icopykey.cli.crypto1_cipher.Crypto1
+       .init_with_tag` which feeds bits LSB-first.  The cipher class is
+       the inconsistent one; fixing it is a separate task and would
+       require regenerating any saved test vectors.
+    """
     state = Crypto1State(
         odd=int.from_bytes(key, "big") & 0xFFFFFF,
         even=(int.from_bytes(key, "big") >> 24) & 0xFFFFFF,
     )
     uid_int = int.from_bytes(uid[:4], "little") & 0xFFFFFFFF
-    # Feed UID through the LFSR (32 clocks, fb=0).
-    for i in range(32):
-        crypto1_bit(state, (uid_int >> i) & 1, 0)
-    # Feed NT through the LFSR (32 clocks, fb=0); collect keystream.
-    ks = 0
-    for i in range(31, -1, -1):
-        ks_bit = crypto1_bit(state, _bebit(nt, i), 0)
-        ks |= ks_bit << (i ^ 24)
-    return ks & 0xFFFFFFFF
+    crypto1_word(state, uid_int, 0)
+    return crypto1_word(state, nt, 0) & 0xFFFFFFFF
 
 
 def _verify_at(
