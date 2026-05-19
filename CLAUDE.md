@@ -4,7 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## In-progress work
 
-**Active investigation:** `docs/next_session_simulate_nfc.md` — confirm or refute whether the device's `SimulateNFC` menu exposes MIFARE card emulation. Requires Windows + USBPcap. If you are starting a session on a Windows machine with the CopyKEY attached, **read that file first** — it has the full briefing, prerequisite install steps, the three captures to take, and what to do with the results.
+Two active threads. If you're a fresh session, read the relevant doc
+first before touching anything else.
+
+- **`docs/next_session_probe_record.md`** — local capture session with
+  the connected CopyKEY device. Use the new `--record FILE.pcapng`
+  flag on `icopyzed probe` to characterise the protocol surface from
+  the host side. Pure data-gathering, no code anticipated. Decide on
+  whether to add an `icopyzed listen` subcommand based on findings.
+- **`docs/next_session_simulate_nfc.md`** — confirm or refute whether
+  the device's `SimulateNFC` menu exposes MIFARE card emulation.
+  Requires Windows + USBPcap. If you're on a Windows machine with the
+  device attached, this is the doc to read.
 
 ## Project
 
