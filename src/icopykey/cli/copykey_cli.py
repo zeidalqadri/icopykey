@@ -319,7 +319,19 @@ def main(argv: list[str] | None = None) -> int:
         from .config_manager import ConfigManager as _CM
         cfg = _CM().config
         vid_str, pid_str = _parse_vid_pid_args(_sys.argv, cfg)
-        d = CopyKeyDevice(vid=vid_str, pid=pid_str)
+        # Honour --record FILE.pcapng even on the no-relay probe path.
+        record_path: str | None = None
+        if "--record" in _sys.argv:
+            idx = _sys.argv.index("--record")
+            if idx + 1 < len(_sys.argv):
+                record_path = _sys.argv[idx + 1]
+        recorder = None
+        if record_path:
+            from .pcap_writer import PcapNgWriter
+
+            recorder = PcapNgWriter(record_path)
+            print_info(f"Recording device I/O to {record_path}")
+        d = CopyKeyDevice(vid=vid_str, pid=pid_str, recorder=recorder)
         if not d.connect():
             print("Device not found.", file=_sys.stderr)
             return 1
