@@ -45,7 +45,7 @@ icopyzed --decode                      # One-click decode all sectors
 icopyzed --list-cards                  # Show saved cards
 icopyzed --import card_dump.json       # Import from file
 icopyzed --export 0 -o ./exports       # Export card #0
-icopyzed --vid 0x0483 --pid 0x5740 --device-info
+icopyzed --vid 0x6300 --pid 0x1991 --device-info
 ```
 
 ### Decrypt Subcommand

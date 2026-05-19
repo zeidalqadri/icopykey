@@ -322,8 +322,8 @@ def _run_device_menu(device: CopyKeyDevice) -> None:
         elif cmd == "info":
             cmd_device_info(device)
         elif cmd == "change":
-            vid = input("  New VID (hex, e.g. 0x0483): ").strip()
-            pid = input("  New PID (hex, e.g. 0x5740): ").strip()
+            vid = input("  New VID (hex, e.g. 0x6300): ").strip()
+            pid = input("  New PID (hex, e.g. 0x1991): ").strip()
             if vid and pid:
                 cmd_device_change(device, vid.replace("0x", ""), pid.replace("0x", ""))
         elif cmd == "reconnect":
@@ -395,7 +395,7 @@ Card Library:
   Search by name or UID.
 
 Device Settings:
-  The default VID=0x0483, PID=0x5740 may need adjustment.
+  The default VID=0x6300, PID=0x1991 may need adjustment.
   Use the Device Settings menu (9) to enumerate and change.
 
 Keyboard Shortcuts:

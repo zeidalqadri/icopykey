@@ -116,8 +116,8 @@ on first run.
 ```json
 {
   "device": {
-    "vid": "0x0483",
-    "pid": "0x5740"
+    "vid": "0x6300",
+    "pid": "0x1991"
   },
   "paths": {
     "vault_dir": "~/.copykey_cli",
@@ -166,7 +166,7 @@ pytest copykey_python/cli/tests/ -v
 
 - The HID protocol commands are **speculative**. Exact command opcodes require USB traffic
   capture with Wireshark/USBPcap.
-- Device VID/PID defaults (`0x0483:0x5740`) are educated guesses — enumerate with Device Settings
-  menu to find the actual values.
+- Device VID/PID defaults (`0x6300:0x1991`) match the CopyKEY HID device — enumerate with the
+  Device Settings menu if your hardware differs.
 - Vault encryption uses PBKDF2-SHA256 (100K iterations) + AES-256-GCM. Do not lose your password.
 - This tool is for legal use only — cards you own or have authorization to analyze.

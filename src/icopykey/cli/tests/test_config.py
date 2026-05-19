@@ -93,10 +93,10 @@ class TestConfigManager:
         cfg = mgr.config
         assert cfg.device.vid == "0x6300"
 
-    def test_get_vid_pid_as_int(self) -> None:
-        mgr = ConfigManager()
-        assert mgr.get_vid() == 0x0483
-        assert mgr.get_pid() == 0x5740
+    def test_get_vid_pid_as_int(self, tmp_path: Path) -> None:
+        mgr = ConfigManager(tmp_path / "config.json")
+        assert mgr.get_vid() == 0x6300
+        assert mgr.get_pid() == 0x1991
 
     def test_parse_error(self, tmp_path: Path) -> None:
         config_path = tmp_path / "bad.json"

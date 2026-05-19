@@ -15,7 +15,7 @@ Usage:
     copykey-cli --list-cards             # List stored cards
     copykey-cli --list-keys              # List stored keys
     copykey-cli --device-info            # Show device info
-    copykey-cli --vid 0x0483 --pid 0x5740  # Specify device VID/PID
+    copykey-cli --vid 0x6300 --pid 0x1991  # Specify device VID/PID
     copykey-cli --verbose                # Enable debug logging
     copykey-cli --no-color               # Disable colored output
     copykey-cli --help                   # Show help
@@ -59,7 +59,7 @@ Examples:
   icopyzed --import card.json       Import card file
   icopyzed --export 0 -o ./exports  Export card by index
   icopyzed --device-info            Show connected device details
-  icopyzed --vid 0x0483 --pid 0x5740  Custom VID/PID
+  icopyzed --vid 0x6300 --pid 0x1991  Custom VID/PID
   icopyzed --verbose                Enable debug output
   icopyzed decrypt                  Launch kopized decryption service
   icopyzed convert input.dump       Normalize card dump to JSON
@@ -84,8 +84,8 @@ Examples:
 
     # ── Options ───────────────────────────────────────────
     opt_group = parser.add_argument_group("Options")
-    opt_group.add_argument("--vid", metavar="HEX", help="Device Vendor ID (default: 0x0483)")
-    opt_group.add_argument("--pid", metavar="HEX", help="Device Product ID (default: 0x5740)")
+    opt_group.add_argument("--vid", metavar="HEX", help="Device Vendor ID (default: 0x6300)")
+    opt_group.add_argument("--pid", metavar="HEX", help="Device Product ID (default: 0x1991)")
     opt_group.add_argument("-o", "--output", metavar="DIR", default=".", help="Output directory for exports")
     opt_group.add_argument("-v", "--verbose", action="store_true", help="Enable verbose/debug logging")
     opt_group.add_argument("--no-color", action="store_true", help="Disable colored output")

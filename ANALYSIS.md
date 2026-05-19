@@ -126,7 +126,7 @@ The Python `X100FormatStrategy` parses this header, validates lengths, extracts 
 | `progress.py` | Complete | ~168 | Progress bars/spinners |
 | `validators.py` | Complete | ~333 | Input validation |
 | `logger_setup.py` | Complete | ~85 | Logging config |
-| `tests/` | Established | 6 files | 186 passing tests (2 xfailed) |
+| `tests/` | Established | 6 files | Test suite green; see `pytest -v` for current counts |
 
 **CLI features**: card info read, one-click decode (key brute-force), Crypto-1 key cracking (`icopyzed crack`), sector encryption, card write, HID TCP relay, local key/card library management (encrypted vault), device probe/descriptor.
 
@@ -191,10 +191,15 @@ All 21 bytes are XOR'd against a per-session keystream derived from the device's
 
 ## Remaining Work
 
-- **GUI layer** — PyQt6 frontend planned but not started
-- **Crypto-1 attack completeness** — current darkside attack works for known nonces; nested attack (recovering unknown nonces) is a stub
-- **HID XOR obfuscation** — Frame format and command set fully verified (3 USBPcap captures). XOR key derivation from device Crypto1 state unknown but session key can be extracted via idle pair. F8 bulk data protocol and 0xDF session init discovered and integrated.
-- **Sector data location** — actual card data not present in primary 21B payload; likely embedded in 64B frame redundancy segments (bytes 22-63). Need capture with known-key card to decode the data format.
-- **Full key recovery pipeline** — `crypto1_attack.py` DarksideAttack not wired to hardware; dictionary-only crack subcommand
-- **NTAG/Ultralight/DESFire support** — only MIFARE Classic 1K/4K handled; 4K large sectors (32-39) are broken
-- **Library import formats** — only JSON supported; .mfd/.bin require separate convert step
+- **Crypto-1 nested attack** — `crypto1_attack.NestedAttack` has the algorithm in place
+  but real-world success depends on raw NACK/parity bits from the reader. Stock `hidapi`
+  on the CopyKEY HID device cannot supply these; use a libnfc-compatible reader via the
+  `nfc_reader` backends, or feed nonces via `icopyzed crack --from-trace FILE`.
+- **Hardware nonce capture** — `nfc_reader.collect_encrypted_nonces` now has libnfc CLI
+  (`mfcuk`/`mfoc`) and `nfcpy` backends. Both require an external NFC reader (ACR122U,
+  PN532, Proxmark with libnfc-compatible firmware). Requires manual hardware verification.
+- **DESFire support** — `mifare_data.py` has a stub for DESFire EV1/EV2 commands;
+  full implementation not started.
+- **C9 sector read 13-byte limitation** — the F8 bulk fallback is wired and works,
+  but a clean C9 decode would need a USBPcap capture of a known-key card so we can
+  match the data format.
