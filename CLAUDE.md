@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## In-progress work
+
+**Active investigation:** `docs/next_session_simulate_nfc.md` — confirm or refute whether the device's `SimulateNFC` menu exposes MIFARE card emulation. Requires Windows + USBPcap. If you are starting a session on a Windows machine with the CopyKEY attached, **read that file first** — it has the full briefing, prerequisite install steps, the three captures to take, and what to do with the results.
+
 ## Project
 
 `icopyzed` (PyPI name) / `icopykey` (Python module) — offline-first NFC/RFID card management for CopyKEY / X100 Smart Card Replicator devices. Reverse-engineered Python reimplementation of the Windows `CopyKEY Manager` app, with all cloud/auth/analytics endpoints hard-blocked.
