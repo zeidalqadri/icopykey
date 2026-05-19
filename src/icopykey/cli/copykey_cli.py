@@ -95,6 +95,7 @@ Examples:
     opt_group.add_argument("--relay", metavar="HOST:PORT", help="Connect via TCP relay (e.g. localhost:9999)")
     opt_group.add_argument("--reader", action="store_true", help="Use external NFC reader for darkside/nested attack")
     opt_group.add_argument("--from-trace", dest="from_trace", metavar="FILE", help="Run `crack` against a captured nonce JSON trace (no hardware needed)")
+    opt_group.add_argument("--record", dest="record", metavar="FILE", help="Self-record every device write/read into a pcapng (compatible with analyze_capture)")
     opt_group.add_argument("--version", action="version", version="copykey-cli 2.1.0")
 
     return parser
@@ -104,7 +105,20 @@ Examples:
 
 
 def _create_device(args: argparse.Namespace) -> CopyKeyDevice:
-    """Return local or remote device based on --relay flag."""
+    """Return local or remote device based on --relay flag.
+
+    If ``--record FILE`` is set, instantiate a :class:`PcapNgWriter`
+    and attach it to the device so every ``write_read`` is mirrored
+    into the pcapng for later analysis.
+    """
+    recorder = None
+    record_path = getattr(args, "record", None)
+    if record_path:
+        from .pcap_writer import PcapNgWriter
+
+        recorder = PcapNgWriter(record_path)
+        print_info(f"Recording device I/O to {record_path}")
+
     if args.relay:
         host = "localhost"
         port = 9999
@@ -112,11 +126,11 @@ def _create_device(args: argparse.Namespace) -> CopyKeyDevice:
         if parts[0]:
             host = parts[0]
         port = int(parts[1]) if len(parts) > 1 else 9999
-        return CopyKeyRemoteDevice(host=host, port=port)
+        return CopyKeyRemoteDevice(host=host, port=port, recorder=recorder)
 
     vid = int(args.vid, 16) if args.vid else DEVICE_VID
     pid = int(args.pid, 16) if args.pid else DEVICE_PID
-    return CopyKeyDevice(vid=vid, pid=pid)
+    return CopyKeyDevice(vid=vid, pid=pid, recorder=recorder)
 
 
 # ── Batch Mode ───────────────────────────────────────────────────

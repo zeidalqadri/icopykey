@@ -88,7 +88,12 @@ class CopyKeyDevice:
     MAX_SECTOR_1K = 15
     MAX_SECTOR_4K = 39
 
-    def __init__(self, vid: int = DEVICE_VID, pid: int = DEVICE_PID) -> None:
+    def __init__(
+        self,
+        vid: int = DEVICE_VID,
+        pid: int = DEVICE_PID,
+        recorder: Any = None,
+    ) -> None:
         self.vid = vid
         self.pid = pid
         self.device: Any = None
@@ -97,6 +102,10 @@ class CopyKeyDevice:
         self.product: str | None = None
         self.serial: str | None = None
         self._session_key: bytes | None = None
+        # Optional :class:`PcapNgWriter` (or any object with
+        # ``write_frame(direction, payload)``).  When set, every
+        # ``write_read`` exchange is mirrored into the pcapng.
+        self.recorder = recorder
 
     def enumerate_devices(self) -> list[dict[str, Any]]:
         try:
@@ -149,6 +158,12 @@ class CopyKeyDevice:
                 self.device = None
                 self.device_path = None
             logger.info("[*] Device closed.")
+        if self.recorder is not None:
+            try:
+                self.recorder.close()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("recorder.close failed: %s", exc)
+            self.recorder = None
 
     def is_connected(self) -> bool:
         return self.device is not None
@@ -227,8 +242,28 @@ class CopyKeyDevice:
             raise ConnectionError("Device not connected")
         if not self.write_output_report(data):
             return None
+        self._record_frame("OUT", data)
         time.sleep(0.05)
-        return self.read_input_report(timeout_ms)
+        resp = self.read_input_report(timeout_ms)
+        if resp is not None:
+            self._record_frame("IN", resp)
+        return resp
+
+    def _record_frame(self, direction: str, payload: bytes) -> None:
+        """Log one HID frame to the attached recorder, if any.
+
+        Pads short payloads to 64 bytes and silently swallows recorder
+        errors — recording must never break the I/O path.
+        """
+        if self.recorder is None:
+            return
+        try:
+            buf = bytearray(payload)
+            if len(buf) < 64:
+                buf.extend(b"\x00" * (64 - len(buf)))
+            self.recorder.write_frame(direction, bytes(buf[:64]))
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("recorder.write_frame failed: %s", exc)
 
     def send_command(self, cmd: bytes, timeout_ms: int = 5000) -> bytes | None:
         """Legacy send using write/read transport (no feature reports)."""
@@ -593,8 +628,13 @@ class CopyKeyDevice:
 class CopyKeyRemoteDevice(CopyKeyDevice):
     """USB HID device accessed through a TCP relay (e.g. SSH tunnel to a Mac)."""
 
-    def __init__(self, host: str = "localhost", port: int = 9999) -> None:
-        super().__init__(vid=0, pid=0)
+    def __init__(
+        self,
+        host: str = "localhost",
+        port: int = 9999,
+        recorder: Any = None,
+    ) -> None:
+        super().__init__(vid=0, pid=0, recorder=recorder)
         self._host = host
         self._port = port
         self._sock: socket.socket | None = None
@@ -688,6 +728,7 @@ class CopyKeyRemoteDevice(CopyKeyDevice):
         payload = struct.pack(">I", timeout_ms) + bytes(buf)
         if not send_frame(self._sock, MSG_WRITE_READ, payload):
             raise ConnectionError("Failed to send WRITE_READ to relay")
+        self._record_frame("OUT", bytes(buf))
 
         frame = recv_frame(self._sock, timeout=max(timeout_ms / 1000.0 + 2.0, 5.0))
         if frame is None:
@@ -700,7 +741,9 @@ class CopyKeyRemoteDevice(CopyKeyDevice):
         ok = response[0] == 0x01
         if ok:
             result = response[1:]
-            return result if result else b"\x00" * 64
+            result = result if result else b"\x00" * 64
+            self._record_frame("IN", result)
+            return result
         return None
 
     def write_output_report(self, data: bytes | bytearray) -> bool:
