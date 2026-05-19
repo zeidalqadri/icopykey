@@ -1,0 +1,22 @@
+{
+  "uid": "11223344",
+  "target_sector": 4,
+  "known_sector": 0,
+  "known_key": "ffffffffffff",
+  "known_nonce": "01020304",
+  "distance_window": [0, 320],
+  "traces": [
+    {
+      "nt_enc": "11223344",
+      "at_enc": "55667788",
+      "nr": "ddeeff00",
+      "distance": 160
+    },
+    {
+      "nt_enc": "aabbccdd"
+    },
+    {
+      "nt_enc": "deadbeef"
+    }
+  ]
+}

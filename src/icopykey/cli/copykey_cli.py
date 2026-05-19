@@ -94,6 +94,7 @@ Examples:
     opt_group.add_argument("--data-dir", metavar="DIR", help="Override data directory (default: ~/.copykey_cli)")
     opt_group.add_argument("--relay", metavar="HOST:PORT", help="Connect via TCP relay (e.g. localhost:9999)")
     opt_group.add_argument("--reader", action="store_true", help="Use external NFC reader for darkside/nested attack")
+    opt_group.add_argument("--from-trace", dest="from_trace", metavar="FILE", help="Run `crack` against a captured nonce JSON trace (no hardware needed)")
     opt_group.add_argument("--version", action="version", version="copykey-cli 2.1.0")
 
     return parser
@@ -277,10 +278,15 @@ def main(argv: list[str] | None = None) -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "crack":
         import sys as _sys
         _sys.argv.pop(1)
-        from .commands import cmd_crack_key
+        from .commands import cmd_crack_key, cmd_crack_from_trace
         from .config_manager import ConfigManager as _CM
         parser = build_parser()
         args = parser.parse_args(_sys.argv[1:])
+
+        # Trace-file path: pure-software attack, no device needed.
+        if args.from_trace:
+            return cmd_crack_from_trace(args.from_trace)
+
         cfg = _CM().config
         data_dir = Path(args.data_dir) if args.data_dir else Path(cfg.paths.vault_dir)
         vault_pw = args.vault_password

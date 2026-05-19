@@ -957,3 +957,51 @@ def _crack_with_external_reader(
                 if result:
                     cracked[sec] = key
                     _print_success(f"  Sector {sec:2d}  KeyA (nested): {key.hex().upper()}")
+
+
+# ── Offline trace-based crack ────────────────────────────────────
+
+
+def cmd_crack_from_trace(trace_path: str) -> int:
+    """Run the nested attack against a JSON nonce trace.
+
+    Returns a process-style exit code so the dispatcher can ``return`` it
+    directly.  See :meth:`NestedAttack.from_trace_file` for the schema.
+    """
+    from .crypto1_attack import NestedAttack
+
+    p = Path(trace_path)
+    if not p.exists():
+        print_error(f"Trace file not found: {trace_path}")
+        return 2
+
+    try:
+        attack = NestedAttack.from_trace_file(p)
+    except (ValueError, KeyError, json.JSONDecodeError) as exc:
+        print_error(f"Invalid trace file: {exc}")
+        return 2
+
+    # Pull the target sector back out of the trace for reporting.
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8"))
+        target_sector = int(payload["target_sector"])
+    except (OSError, ValueError, KeyError) as exc:
+        print_error(f"Cannot read target_sector from trace: {exc}")
+        return 2
+
+    print_info(f"Loaded trace: {trace_path}")
+    print_info(f"  UID: {attack._uid.hex().upper()}")
+    print_info(f"  Target sector: {target_sector}")
+    print_info(f"  Traces: {len(attack._encrypted_traces.get(target_sector, []))}")
+    if attack._known_keys:
+        for sec, key in attack._known_keys.items():
+            print_info(f"  Known key sector {sec}: {key.hex().upper()}")
+    print_divider()
+
+    key = attack.recover_key(target_sector)
+    if key is None:
+        print_warning("No key recovered from trace.")
+        return 1
+
+    print_success(f"Recovered key for sector {target_sector}: {key.hex().upper()}")
+    return 0

