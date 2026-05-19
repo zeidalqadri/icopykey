@@ -262,8 +262,6 @@ class MainWindow(QMainWindow):
             self.tabs.setCurrentIndex(0)
 
     def _on_add_key(self) -> None:
-        from PyQt6.QtWidgets import QDialog, QLineEdit
-
         dialog = QDialog(self)
         dialog.setWindowTitle("Add Key")
         layout = QFormLayout(dialog)
