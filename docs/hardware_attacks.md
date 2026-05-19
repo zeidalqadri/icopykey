@@ -5,6 +5,20 @@ external libnfc-compatible reader. The CopyKEY HID device cannot supply
 raw encrypted nonces; this is the path for cards where the dictionary
 attack ([`manual_testing.md`](./manual_testing.md)) failed.
 
+## Built-in USB capture
+
+Both `icopyzed sniff` (wraps OS-native USB sniffers) and
+`icopyzed --record FILE.pcapng <cmd>` (self-records our own device
+exchanges) ship in this package and produce pcapng files that
+`analyze_capture.py` reads directly. See `docs/next_session_simulate_nfc.md`
+for the canonical workflow. Use them whenever you need to diff the
+official Windows app's traffic against ours, or capture a wire-format
+example of a new firmware behaviour.
+
+Prerequisites: USBPcap on Windows, `tcpdump` + `usbmon` kernel module
+on Linux. macOS is not supported for `sniff` (no usbmon equivalent);
+`--record` works on macOS for self-traffic.
+
 ## What you need
 
 Pick one reader. The toolchain is the same; only the install/setup

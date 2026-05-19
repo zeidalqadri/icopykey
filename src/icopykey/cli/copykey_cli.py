@@ -262,6 +262,11 @@ def main(argv: list[str] | None = None) -> int:
         from .hidrelay import main as relay_main
         return relay_main()
 
+    if len(sys.argv) > 1 and sys.argv[1] == "sniff":
+        sys.argv.pop(1)
+        from .sniff import main as sniff_main
+        return sniff_main()
+
     if len(sys.argv) > 1 and sys.argv[1] == "probe":
         import sys as _sys
         if "--relay" in _sys.argv:

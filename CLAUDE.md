@@ -31,6 +31,8 @@ icopyzed --read | --decode | ...      # batch mode
 icopyzed decrypt                      # subcommand → x100.kopized_cli
 icopyzed convert                      # subcommand → x100.cli
 icopyzed relay-server                 # subcommand → cli.hidrelay
+icopyzed sniff [--out FILE.pcapng]    # built-in USB capture (wraps USBPcap/usbmon)
+icopyzed --record FILE.pcapng <cmd>   # self-record icopyzed's own device I/O
 icopyzed probe | crack | descriptor   # subcommands handled inline in copykey_cli.py
 
 python -m icopykey.gui                # PyQt5 GUI
@@ -90,6 +92,30 @@ Two entry points:
 External NFC reader integration lives in `cli/nfc_reader.py` behind two ABCs:
 - `KeyRecoverySource` — runs the full attack and returns a key. `LibNfcCLIKeyRecovery` shells out to `mfcuk -R <block>:<A|B>` and parses the canonical `INFO: block N recovered KEY: <hex>` line. This is what `--reader` uses today.
 - `NonceSource` — captures raw nonces only. `LibNfcCLINonceSource` (mfcuk -C) and `NfcpyNonceSource` exist for the older nonce-then-recover flow, but their recovery path feeds the broken in-house code. Useful only for diagnostic capture today; not the recommended end-to-end path.
+
+### USB capture (`cli/sniff.py`, `cli/pcap_writer.py`)
+
+Two complementary capture surfaces that both produce pcapng files
+readable by `cli/analyze_capture.py` (USBPcap v1 framing,
+REPORT_PREFIX=0x95 filter, 91-byte captured-data per frame):
+
+- **`icopyzed sniff`** — wraps the OS-native sniffer (`USBPcapCMD.exe`
+  on Windows, `tcpdump -i usbmonN` on Linux) via subprocess. Captures
+  any host app's traffic with the device. Auto-detects the CopyKEY's
+  bus by parsing `--devices` output (Windows) or
+  `/sys/kernel/debug/usb/devices` (Linux). Capture is per-USB-bus, not
+  per-device; analysis-time filtering keeps the output focused.
+  macOS prints a clean unsupported message (no usbmon equivalent).
+- **`icopyzed --record FILE.pcapng`** — self-records icopyzed's own
+  device exchanges. Hooks `CopyKeyDevice.write_read()` (the single
+  chokepoint for both local HID and TCP-relay paths), mirroring every
+  OUT/IN pair into the pcapng via `PcapNgWriter`. Useful for protocol
+  regression across firmware revisions; does NOT see other apps'
+  traffic (`sniff` is the tool for that).
+
+`PcapNgWriter` in `cli/pcap_writer.py` is intentionally minimal —
+no third-party pcap libs. Layout is byte-exact to what
+`analyze_capture.parse_pcapng` already reads.
 
 ### Card data flow
 

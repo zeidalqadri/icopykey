@@ -49,13 +49,18 @@ On the Windows machine with the CopyKEY device attached:
 2. Install Python 3.12+ and the project deps:
    `pip install -e ".[dev]"`
 3. Install [USBPcap](https://desowin.org/usbpcap/) — it's a Windows
-   kernel driver that adds USB buses to Wireshark.
-4. Install [Wireshark](https://www.wireshark.org/) (USBPcap registers
-   itself in Wireshark's interface list).
-5. Install the official `CopyKEY Manager` Windows app
+   kernel driver that exposes USB buses to user-mode capture.
+   `icopyzed sniff` will auto-locate `USBPcapCMD.exe` afterwards; you
+   do **not** need Wireshark or a separate GUI for this workflow.
+4. Install the official `CopyKEY Manager` Windows app
    (`CopyKEY Manager V2.0.2.1.2604132.exe` is in the repo root — copy
    it across).
-6. Have a MIFARE Classic test card on hand.
+5. Have a MIFARE Classic test card on hand.
+
+Verify the toolchain by running `icopyzed sniff --list` — it should
+print every USBPcap filter with `← CopyKEY here` against whichever
+filter holds your device. If that line is missing, the device isn't
+plugged in or USBPcap can't see it; fix that before the captures.
 
 VPS / remote-desktop variant: if the device is plugged into a different
 Windows host and you're remoting in via a VPS, USB-over-IP works (USB
@@ -69,21 +74,29 @@ Save each into `tests/data/captures/`, named exactly as below.
 
 ### 1. Baseline idle (`tests/data/captures/baseline_idle.pcapng`)
 
+```cmd
+icopyzed sniff --out tests/data/captures/baseline_idle.pcapng --duration 30
+```
+
 - Open CopyKEY Manager. Connect to the device.
-- Let it sit idle for ~30 seconds with nothing happening.
-- Stop the capture.
+- Let it sit idle for the full 30 seconds with nothing happening.
+- `--duration 30` stops the capture automatically; otherwise Ctrl-C
+  also works.
 
 This gives us the heartbeat / idle traffic envelope to subtract from
 later captures.
 
 ### 2. SimulateNFC activation (`tests/data/captures/simulate_nfc.pcapng`)
 
-- Start a fresh capture.
+```cmd
+icopyzed sniff --out tests/data/captures/simulate_nfc.pcapng
+```
+
 - On the device's physical menu, navigate to **CARD PARAM**.
 - Press the **SIMULATE** button to start the phone-transfer mode.
 - Pair / open the CopyKEY phone app if applicable. Let any data
   transfer complete.
-- Stop the capture.
+- Ctrl-C to stop.
 
 If no phone is available, capture the device's HID activity from when
 you press SIMULATE until it returns to idle — even an empty
@@ -91,15 +104,30 @@ you press SIMULATE until it returns to idle — even an empty
 
 ### 3. Reference card read (`tests/data/captures/reference_read.pcapng`)
 
-- Start a fresh capture.
+```cmd
+icopyzed sniff --out tests/data/captures/reference_read.pcapng
+```
+
 - In the Windows app, place a MIFARE card on the device and trigger a
   read.
 - Wait for decode to complete.
-- Stop the capture.
+- Ctrl-C to stop.
 
 This is a baseline of what known commands look like in this exact
 firmware version (some commands may have changed across firmware
 revisions; current `_protocol.py` was derived from older captures).
+
+### Bonus: self-recorded baseline
+
+```cmd
+icopyzed --record tests/data/captures/self_dev_info.pcapng --device-info
+icopyzed --record tests/data/captures/self_probe.pcapng probe
+```
+
+This records only what `icopyzed` itself sends/receives (no other
+apps), which is useful for diffing against the captures above: any
+commands or payload templates present in the official-app captures
+but absent here are firmware features we haven't implemented yet.
 
 ## How to decode each capture
 
