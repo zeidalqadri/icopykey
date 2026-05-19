@@ -1,22 +1,14 @@
 {
+  "_doc": "Synthetic ground-truth MIFARE Classic auth trace. Built by running the canonical Crypto-1 cipher forward with the values below; icopyzed crack --from-trace recovers target_key via mfkey64.",
+  "_target_key": "a0a1a2a3a4a5",
   "uid": "11223344",
   "target_sector": 4,
-  "known_sector": 0,
-  "known_key": "ffffffffffff",
-  "known_nonce": "01020304",
-  "distance_window": [0, 320],
-  "traces": [
+  "mfkey64_traces": [
     {
-      "nt_enc": "11223344",
-      "at_enc": "55667788",
-      "nr": "ddeeff00",
-      "distance": 160
-    },
-    {
-      "nt_enc": "aabbccdd"
-    },
-    {
-      "nt_enc": "deadbeef"
+      "nt": "deadbeef",
+      "nr": "cafebabe",
+      "ar_enc": "6fa25024",
+      "at_enc": "ac33280b"
     }
   ]
 }

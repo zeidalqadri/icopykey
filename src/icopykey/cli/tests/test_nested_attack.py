@@ -202,11 +202,11 @@ def test_cmd_crack_from_trace_invalid_json(tmp_path: Path) -> None:
 
 
 def test_cmd_crack_from_trace_runs_against_sample_fixture() -> None:
-    """The bundled sample fixture loads and runs end-to-end.
+    """The bundled sample fixture is a ground-truth mfkey64 trace.
 
-    The synthetic nonces in the sample don't correspond to a real key,
-    so we expect rc=1 (no key recovered), but the command must complete
-    cleanly with no exceptions.
+    `tests/data/nested_traces/sample.json` is generated to encode a
+    full MIFARE Classic auth (uid, nt, nr, ar_enc, at_enc) for a known
+    target key, so `cmd_crack_from_trace` must recover it and return 0.
     """
     from ..commands import cmd_crack_from_trace
 
@@ -214,4 +214,4 @@ def test_cmd_crack_from_trace_runs_against_sample_fixture() -> None:
     sample = repo_root / "tests" / "data" / "nested_traces" / "sample.json"
     assert sample.exists(), f"sample fixture missing at {sample}"
     rc = cmd_crack_from_trace(str(sample))
-    assert rc in (0, 1)
+    assert rc == 0, "ground-truth sample fixture must recover via mfkey64"

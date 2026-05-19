@@ -1006,6 +1006,9 @@ class NestedAttack:
         self._encrypted_traces: dict[
             int, list[tuple[bytes, bytes | None, bytes | None, int | None]]
         ] = {}
+        # full auth traces suitable for mfkey64 (per target sector):
+        # each entry is (nt_plain, nr, ar_enc, at_enc) as 32-bit ints
+        self._mfkey64_traces: dict[int, list[tuple[int, int, int, int]]] = {}
 
     def set_uid(self, uid: bytes) -> None:
         """Set the card UID (4 bytes)."""
@@ -1062,6 +1065,33 @@ class NestedAttack:
             (encrypted_tag_nonce, encrypted_tag_answer, reader_nonce, distance_hint)
         )
 
+    def add_mfkey64_trace(
+        self,
+        target_sector: int,
+        nt: bytes | int,
+        nr: bytes | int,
+        ar_enc: bytes | int,
+        at_enc: bytes | int,
+    ) -> None:
+        """Record one complete MIFARE auth trace suitable for
+        :func:`crypto1_canonical.mfkey64` recovery.
+
+        Inputs may be 4-byte big-endian bytes or 32-bit ints — both
+        accepted to ease conversion from JSON or wire-format captures.
+        """
+
+        def _as_int(v: bytes | int) -> int:
+            if isinstance(v, int):
+                return v & 0xFFFFFFFF
+            if len(v) != 4:
+                raise ValueError("expected 4 bytes")
+            return int.from_bytes(v, "big")
+
+        bucket = self._mfkey64_traces.setdefault(target_sector, [])
+        bucket.append(
+            (_as_int(nt), _as_int(nr), _as_int(ar_enc), _as_int(at_enc))
+        )
+
     # ── Recovery ─────────────────────────────────────────────────────
 
     def recover_key(
@@ -1071,9 +1101,35 @@ class NestedAttack:
     ) -> bytes | None:
         """Attempt to recover the key for *target_sector*.
 
-        Tries Path A first (3+ encrypted nonces, no known key required),
-        then Path B (known key + at least one trace).
+        Recovery order:
+
+        1. **Path mfkey64**: if any full auth traces have been added via
+           :meth:`add_mfkey64_trace`, try the canonical proxmark3
+           ``mfkey64`` algorithm against each.  This is the only path
+           that actually recovers keys today (see the round-trip tests
+           in ``test_crypto1_canonical.py``).
+        2. **Path A**: 3+ encrypted nonces, no known key — uses the
+           PRNG-keystream attack via :func:`recover_keystream_from_nonces`.
+           Currently returns candidates that do not match real keys
+           because the in-house ``recover_key_from_keystream`` is
+           incomplete (see warning in its docstring).
+        3. **Path B**: known key + plaintext nt + at least one nested
+           trace.  Same caveat as Path A.
+
+        Paths 2 and 3 are kept for backward compatibility; new callers
+        should prefer Path mfkey64.
         """
+        # ── Path mfkey64: canonical full-auth recovery ────────────
+        mfkey_traces = self._mfkey64_traces.get(target_sector, [])
+        if mfkey_traces and self._uid:
+            from .crypto1_canonical import mfkey64
+
+            uid_int = int.from_bytes(self._uid[:4], "big")
+            for nt, nr, ar_enc, at_enc in mfkey_traces:
+                key_int = mfkey64(uid_int, nt, nr, ar_enc, at_enc)
+                if key_int is not None:
+                    return key_int.to_bytes(6, "big")
+
         traces = self._encrypted_traces.get(target_sector, [])
         if not traces:
             return None
@@ -1230,6 +1286,15 @@ class NestedAttack:
                 else None,
                 distance_hint=trace.get("distance"),
             )
+        # Full mfkey64-style auth traces (preferred path — actually recovers keys).
+        for trace in payload.get("mfkey64_traces", []):
+            attack.add_mfkey64_trace(
+                target_sector=target_sector,
+                nt=bytes.fromhex(trace["nt"]),
+                nr=bytes.fromhex(trace["nr"]),
+                ar_enc=bytes.fromhex(trace["ar_enc"]),
+                at_enc=bytes.fromhex(trace["at_enc"]),
+            )
         return attack
 
     @classmethod
@@ -1245,7 +1310,15 @@ class NestedAttack:
               "known_key":    "ffffffffffff",   # 6-byte hex, optional (Path B)
               "known_nonce":  "AABBCCDD",       # 4-byte hex, optional (Path B)
               "distance_window": [0, 320],       # optional override
-              "traces": [
+              "mfkey64_traces": [                # PREFERRED — full auth trace
+                {
+                  "nt":       "DEADBEEF",       # plaintext tag challenge
+                  "nr":       "11223344",       # plaintext reader challenge
+                  "ar_enc":   "55747576",       # encrypted reader response
+                  "at_enc":   "3d488c43"        # encrypted tag response
+                }
+              ],
+              "traces": [                        # nested-flow only (Path A/B; experimental)
                 {
                   "nt_enc":   "11223344",       # 4-byte hex, required
                   "at_enc":   "55667788",       # 4-byte hex, optional
@@ -1255,8 +1328,19 @@ class NestedAttack:
               ]
             }
 
-        The encoded JSON is the contract between :func:`icopyzed crack
-        --from-trace` and external capture tools.  See
+        ``mfkey64_traces`` is the recommended shape: each entry is a
+        complete MIFARE Classic auth (plaintext nt + nr, encrypted ar +
+        at) and is recovered with the canonical ``mfkey64`` algorithm
+        ported in :mod:`icopykey.cli.crypto1_canonical`.  This is the
+        only path that actually recovers real keys today.
+
+        ``traces`` is the older nested-flow schema and is kept for
+        backward compatibility; its recovery paths return candidates
+        but do not currently produce correct keys (see the warning on
+        :func:`recover_key_from_keystream`).
+
+        The encoded JSON is the contract between ``icopyzed crack
+        --from-trace`` and external capture tools.  See
         :mod:`icopykey.cli.nfc_reader` for adapters that produce it.
         """
         import json
