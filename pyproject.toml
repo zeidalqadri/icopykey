@@ -44,3 +44,8 @@ where = ["src"]
 
 [tool.setuptools]
 license-files = []
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks slow tests (deselect with '-m \"not slow\"')",
+]
