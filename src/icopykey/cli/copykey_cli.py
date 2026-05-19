@@ -215,30 +215,63 @@ def run_batch_mode(args: argparse.Namespace) -> int:
 
 
 def _parse_vid_pid_args(argv: list[str], cfg: Any) -> tuple[int, int]:
-    """Parse --vid / --pid from argv or fall back to config defaults.
-    Also accepts positional args: icopyzed descriptor 0x6300 0x1991
+    """Parse --vid / --pid from argv, falling back to config, then to
+    the authoritative constants (:data:`constants.DEVICE_VID` /
+    :data:`DEVICE_PID`).
+
+    When neither CLI args nor config name a device that is actually
+    present on the USB bus, fall through to the constants — this saves
+    users whose ``~/.copykey_cli/config.json`` still contains the
+    pre-2026-05-19 placeholder ``0x0483/0x5740`` from a silent
+    "Device not found".  Also accepts positional args:
+    ``icopyzed descriptor 0x6300 0x1991``.
     """
     vid: int = 0
     pid: int = 0
+    explicit = False  # set when --vid or positional argv was used
     i = 2
     while i < len(argv):
         if argv[i] == "--vid" and i + 1 < len(argv):
             vid = int(argv[i + 1], 16)
+            explicit = True
             i += 2
         elif argv[i] == "--pid" and i + 1 < len(argv):
             pid = int(argv[i + 1], 16)
+            explicit = True
             i += 2
         else:
             break
-    # If no --vid, try positional args
+    # If no --vid, try positional args (legacy 4-arg descriptor invocation)
     if vid == 0 and len(argv) > 2 and not argv[2].startswith("--"):
         vid = int(argv[2], 16)
+        explicit = True
     if pid == 0 and len(argv) > 3 and not argv[3].startswith("--"):
         pid = int(argv[3], 16)
+        explicit = True
     if vid == 0:
         vid = int(cfg.device.vid, 16) if isinstance(cfg.device.vid, str) else cfg.device.vid
     if pid == 0:
         pid = int(cfg.device.pid, 16) if isinstance(cfg.device.pid, str) else cfg.device.pid
+
+    # If the user did NOT explicitly pass VID/PID, sanity-check the
+    # config-derived values against what's actually plugged in. If the
+    # config-supplied IDs don't enumerate but the constants do, fall
+    # through to the constants with a warning. This rescues users with
+    # stale config.json files.
+    if not explicit and (vid, pid) != (DEVICE_VID, DEVICE_PID):
+        try:
+            import hid  # type: ignore
+            if not hid.enumerate(vid, pid) and hid.enumerate(DEVICE_VID, DEVICE_PID):
+                print_warning(
+                    f"Stale config VID=0x{vid:04X}/PID=0x{pid:04X} not present; "
+                    f"falling back to defaults 0x{DEVICE_VID:04X}/0x{DEVICE_PID:04X}. "
+                    "Consider editing ~/.copykey_cli/config.json or running "
+                    "`icopyzed --vid 0x6300 --pid 0x1991 ...` once to update it."
+                )
+                vid, pid = DEVICE_VID, DEVICE_PID
+        except ImportError:
+            pass
+
     return vid, pid
 
 
