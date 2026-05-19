@@ -68,19 +68,24 @@ Reverse-engineered from 3 USBPcap captures. **Do not treat the wire format as st
 - All 21 payload bytes are XOR-obfuscated against a per-session keystream derived from device Crypto1 state. Template replay works for known ops; dynamic params need the XOR key.
 - `cmd_device_probe` exercises all paths; use it after protocol changes.
 
-### Crypto-1 (`cli/crypto1_cipher.py` → `cli/crypto1_attack.py`)
+### Crypto-1 (`cli/crypto1_canonical.py` + `cli/crypto1_attack.py` + `cli/crypto1_cipher.py`)
 
-`Crypto1` (cipher) is a thin wrapper around `Crypto1State` (LFSR + attacks) — a port of `crapto1.c` with **split 24-bit odd/even LFSR halves**. The 2^20-entry numpy filter table accelerates `_filter` lookups by ~100×; `_extend_table_simple` was converted from O(n²) insert/pop to O(n) list-comprehension append. Touch carefully — there is one xfailed test (`test_lfsr_rollback_word`) documenting a 23-bit limitation.
+**Two coexisting implementations.** The original `crypto1_attack.py` is a partial, structurally-incomplete port of `crapto1.c` — the in-house `crypto1_bit` is missing the odd/even role swap at the end of each clock, `lfsr_rollback_word` loses the top bit of odd on each cycle (xfail'd `test_lfsr_rollback_word`), and `lfsr_recovery64`'s ks2/ks3 layout is wrong. Its `recover_key_from_keystream`, `DarksideAttack`, and `NestedAttack` Paths A/B all return candidates but **never recover the correct key** (xfail'd `test_recover_key_from_keystream_round_trip`). The module-level docstring is a prominent warning.
 
-`crack_key` → `recover_key` implements the darkside attack. `NestedAttack` (same file) has two paths:
-- **Path A** — 3+ encrypted nonces from one sector → PRNG keystream recovery (mfcuk-style, no known key needed).
-- **Path B** — known key + plaintext `nt_A` + at least one `{nt_B}` from a nested auth → PRNG-distance window. Optional `at_enc`/`nr` enable candidate validation via `_verify_at`.
+**`crypto1_canonical.py` is the working implementation.** Line-by-line port of `crapto1.c` from libnfc/mfcuk and proxmark3/mfkey.c, verified by self-consistent round-trips: `mfkey64(uid, nt, nr, ar_enc, at_enc)` recovers the target key across 15 random and hand-picked cases (`test_crypto1_canonical.py`). The canonical version differs from the in-house port in three ways: (1) `crypto1_bit` swaps odd/even at end of each clock; (2) `lfsr_rollback_bit` swaps at start; (3) `lfsr_recovery64` concatenates ks2/ks3 instead of interleaving. Values are kept in a full 32-bit window, not masked to 24 bits.
+
+`NestedAttack.recover_key` tries paths in this order:
+1. **mfkey64 path** (works) — uses canonical `crypto1_canonical.mfkey64` if any `mfkey64_traces` are present.
+2. **Path A** (broken, kept for surface compat) — 3+ encrypted nonces, no known key.
+3. **Path B** (broken, kept for surface compat) — known key + nested trace.
 
 Two entry points:
-- `icopyzed crack` — wires `cmd_crack_key` to the device (and `--reader` for external nonce capture).
-- `icopyzed crack --from-trace FILE` — pure software, no device. Loads `NestedAttack.from_trace_file` JSON; schema documented on the classmethod docstring.
+- `icopyzed crack` — `cmd_crack_key` against the CopyKEY device. Dictionary attack via `DEFAULT_KEYS`. `--reader` flag adds darkside recovery via `mfcuk -R` for sectors that survive the dictionary (see `_crack_with_external_reader` in `commands.py` and `LibNfcCLIKeyRecovery` in `nfc_reader.py`).
+- `icopyzed crack --from-trace FILE` — pure software, no device. The recommended path: use `mfkey64_traces` in the JSON (full `nt/nr/ar_enc/at_enc` per auth) and recovery is via the canonical port. Schema documented on `NestedAttack.from_trace_file` docstring and at `tests/data/nested_traces/README.md`. Ground-truth fixture at `tests/data/nested_traces/sample.json` (recovers `A0A1A2A3A4A5`).
 
-Hardware nonce capture lives in `cli/nfc_reader.py` behind the `NonceSource` ABC: `LibNfcCLINonceSource` shells out to `mfcuk`, `NfcpyNonceSource` delegates to an optional `nfc._icopykey_capture_nonces` helper. `auto_nonce_source()` picks whichever is installed; stock PC/SC APDUs cannot supply raw nonces, so one of these backends is required for `--reader` mode.
+External NFC reader integration lives in `cli/nfc_reader.py` behind two ABCs:
+- `KeyRecoverySource` — runs the full attack and returns a key. `LibNfcCLIKeyRecovery` shells out to `mfcuk -R <block>:<A|B>` and parses the canonical `INFO: block N recovered KEY: <hex>` line. This is what `--reader` uses today.
+- `NonceSource` — captures raw nonces only. `LibNfcCLINonceSource` (mfcuk -C) and `NfcpyNonceSource` exist for the older nonce-then-recover flow, but their recovery path feeds the broken in-house code. Useful only for diagnostic capture today; not the recommended end-to-end path.
 
 ### Card data flow
 
